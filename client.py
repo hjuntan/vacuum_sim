@@ -154,7 +154,9 @@ for idx, target in enumerate(goals):
         time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
     print("Goal processing complete for ", goal_name, "!\n")
 
-print("\nAll goals processed!")
+print("####################")
+print("All goals processed!")
+print("####################")
 
 # Load a scene, read the robot and camera info, save the map.
 # robot, _ = call("get_robot_info")
