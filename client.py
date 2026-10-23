@@ -21,7 +21,7 @@ args = ap.parse_args()
 def url(k):
     return f"tcp://{args.host}:{args.port_base + k}"
 
-
+# Setups for the 4 sockets: RPC, command, state stream, camera stream.
 ctx = zmq.Context()
 rpc = ctx.socket(zmq.REQ)
 rpc.connect(url(0))
@@ -52,52 +52,113 @@ def latest(sock):
         msg = sock.recv_multipart()
     return msg
 
+# List the available scenes
+scenes, _ = call("list_scenes")
+print("Available scenes:", [s["id"] for s in scenes])
+
+# Choose scene: 01 for now
+scene, _ = call("load_scene", id="01", seed=42)
+print("Loaded scene '01'. Start pose:", scene["start"])
+
+# Get available goals
+goals = scene["goals"]
+if not goals:
+    goals, _ = call("get_goals")
+print("Goals:", [g["name"] for g in goals])
+
+if not goals:
+    print("No goals found in this scene.")
+    exit(1)
+
+for idx, target in enumerate(goals):
+    # Format: [x, y] or [x, y, yaw]
+    goal_name = target["name"]
+    goal_pose = target["pose"] 
+
+    target_x, target_y = goal_pose[0], goal_pose[1]
+    target_yaw = goal_pose[2] if len(goal_pose) > 2 else None
+
+    print(f"Driving straight to goal '{goal_name}' at x={target_x}, y={target_y}")
+
+
+    # Send straight-line goto command (easy mode)
+    goto_id = idx + 1
+    payload = {
+        "type": "goto",
+        "id": goto_id,
+        "x": target_x,
+        "y": target_y,
+    }
+    if target_yaw is not None:
+        payload["yaw"] = target_yaw
+
+    cmd.send_json(payload)
+
+    # Monitor state stream until reached or bumped
+    while True:
+        robot_state = json.loads(latest(state)[0])
+        print("Robot state:", robot_state)
+        goto_info = robot_state["goto"]
+        status = goto_info["status"]
+        pose = robot_state["pose"]
+
+        print(f"Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Goto status: {status}", end="\r")
+
+        if status == "reached":
+            print(f"\nRobot reached goal area! Calling mark_goal for '{goal_name}'...")
+            mark_res, _ = call("mark_goal", name=goal_name)
+            print("Mark goal response:", mark_res)
+            break
+        elif status == "bumped":
+            print("\nRobot bumped into an unexpected obstacle!")
+            break
+
+        time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
+
+    print("\nAll goals processed!")
 
 # Load a scene, read the robot and camera info, save the map.
-print("scenes:", [s["id"] for s in call("list_scenes")[0]])
-scene, _ = call("load_scene", id="01", seed=42)
-print("start:", scene["start"], "goals:", [g["name"] for g in scene["goals"]])
-robot, _ = call("get_robot_info")
-cam, _ = call("get_camera_info")
-map_info, (png,) = call("get_map")
-Image.open(io.BytesIO(png)).save("map.png")
-print("map:", map_info)
+# robot, _ = call("get_robot_info")
+# cam, _ = call("get_camera_info")
+# map_info, (png,) = call("get_map")
+# Image.open(io.BytesIO(png)).save("map.png")
+# print("map:", map_info)
 
-# Wheels: rad/s per wheel, resend at 20 Hz (250 ms watchdog). Turn in place at 1 rad/s for 1.5 s.
-turn_rate = 1.0
-wheel_speed = turn_rate * robot["wheel_base"] / 2 / robot["wheel_radius"]
-for _ in range(30):
-    cmd.send_json({"type": "wheels", "left": -wheel_speed, "right": wheel_speed})
-    time.sleep(0.05)
-robot_state = json.loads(latest(state)[0])
-print("after turning:", robot_state["pose"], robot_state["wheels"])
+# # Wheels: rad/s per wheel, resend at 20 Hz (250 ms watchdog). Turn in place at 1 rad/s for 1.5 s.
+# turn_rate = 1.0
+# wheel_speed = turn_rate * robot["wheel_base"] / 2 / robot["wheel_radius"]
+# for _ in range(30):
+#     cmd.send_json({"type": "wheels", "left": -wheel_speed, "right": wheel_speed})
+#     time.sleep(0.05)
+# robot_state = json.loads(latest(state)[0])
+# print("after turning:", robot_state["pose"], robot_state["wheels"])
 
-# goto 0.3 m straight ahead, then follow the state stream for 3 s.
-pose = robot_state["pose"]
-x = pose["x"] + 0.3 * math.cos(pose["yaw"])
-y = pose["y"] + 0.3 * math.sin(pose["yaw"])
-cmd.send_json({"type": "goto", "id": 1, "x": x, "y": y})
-end = time.monotonic() + 3.0
-while time.monotonic() < end:
-    robot_state = json.loads(latest(state)[0])
-print("goto:", robot_state["goto"], "pose:", robot_state["pose"], "bumper:", robot_state["bumper"])
+# # goto 0.3 m straight ahead, then follow the state stream for 3 s.
+# pose = robot_state["pose"]
+# x = pose["x"] + 0.3 * math.cos(pose["yaw"])
+# y = pose["y"] + 0.3 * math.sin(pose["yaw"])
+# cmd.send_json({"type": "goto", "id": 1, "x": x, "y": y})
+# end = time.monotonic() + 3.0
+# while time.monotonic() < end:
+#     robot_state = json.loads(latest(state)[0])
+# print("goto:", robot_state["goto"], "pose:", robot_state["pose"], "bumper:", robot_state["bumper"])
 
-# Camera: header, JPEG, uint16 depth (mm).
-header, jpg, raw = latest(camera)
-header = json.loads(header)
-rgb = np.array(Image.open(io.BytesIO(jpg)))
-depth = np.frombuffer(raw, "<u2").reshape(header["height"], header["width"]) * cam["depth_scale"]
+# # Camera: header, JPEG, uint16 depth (mm).
+# header, jpg, raw = latest(camera)
+# header = json.loads(header)
+# rgb = np.array(Image.open(io.BytesIO(jpg)))
+# depth = np.frombuffer(raw, "<u2").reshape(header["height"], header["width"]) * cam["depth_scale"]
 
-# Back-project the centre pixel: pixel -> camera frame -> robot frame -> world frame.
-u, v = header["width"] // 2, header["height"] // 2
-z = depth[v, u]
-x_camera = (u - cam["cx"]) * z / cam["fx"]
-y_camera = (v - cam["cy"]) * z / cam["fy"]
-p_camera = np.array([x_camera, y_camera, z, 1.0])
-p_robot = np.array(cam["T_base_camera"]) @ p_camera
-pose = header["pose"]
-cos_yaw, sin_yaw = math.cos(pose["yaw"]), math.sin(pose["yaw"])
-x_world = pose["x"] + cos_yaw * p_robot[0] - sin_yaw * p_robot[1]
-y_world = pose["y"] + sin_yaw * p_robot[0] + cos_yaw * p_robot[1]
-p_world = (x_world, y_world, p_robot[2])
-print(f"camera seq {header['seq']}: rgb {rgb.shape}, centre depth {z:.3f} m -> world {np.round(p_world, 3)}")
+# # Back-project the centre pixel: pixel -> camera frame -> robot frame -> world frame.
+# u, v = header["width"] // 2, header["height"] // 2
+# z = depth[v, u]
+# x_camera = (u - cam["cx"]) * z / cam["fx"]
+# y_camera = (v - cam["cy"]) * z / cam["fy"]
+# p_camera = np.array([x_camera, y_camera, z, 1.0])
+# p_robot = np.array(cam["T_base_camera"]) @ p_camera
+# pose = header["pose"]
+# cos_yaw, sin_yaw = math.cos(pose["yaw"]), math.sin(pose["yaw"])
+# x_world = pose["x"] + cos_yaw * p_robot[0] - sin_yaw * p_robot[1]
+# y_world = pose["y"] + sin_yaw * p_robot[0] + cos_yaw * p_robot[1]
+# p_world = (x_world, y_world, p_robot[2])
+# print(f"camera seq {header['seq']}: rgb {rgb.shape}, centre depth {z:.3f} m -> world {np.round(p_world, 3)}")
