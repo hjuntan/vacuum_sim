@@ -42,8 +42,8 @@ goal_pose = target_goal["pose"]
 print(f"Testing path to Goal '{target_goal['name']}' at pose: {goal_pose}")
 
 # 3. Get map and initialize planner
-map_info, map_frames = call("get_map")
-planner = Planner(map_info, map_frames[0])
+map_info, (png,) = call("get_map")
+planner = Planner(map_info, png)
 print(f"Map loaded: {map_info['width']}x{map_info['height']} at resolution {map_info['resolution']}m/pixel")
 
 # 4. Run A* planner
@@ -57,7 +57,7 @@ print(f"✅ A* Planner test PASSED! Generated path with {len(path)} waypoints.")
 print(f"First 5 waypoints: {path[:5]}") 
 
 # 5. Visualize and save path on top of the map image for inspection
-grid_img = Image.open(BytesIO(map_frames[0])).convert("RGB")
+grid_img = Image.open(BytesIO(png)).convert("RGB")
 
 plt.figure(figsize=(8, 8))
 plt.imshow(grid_img, cmap="gray", origin="upper")

@@ -9,6 +9,7 @@ import math
 import time
 
 import numpy as np
+from planner import Planner
 import zmq
 from PIL import Image
 
@@ -79,91 +80,116 @@ wheel_radius = robot_info["wheel_radius"]
 turn_rate = 1.5
 turn_wheel_speed = turn_rate * wheel_base / 2 / wheel_radius
 
+# Get map and initialize planner
+map_info, (png,) = call("get_map")
+planner = Planner(map_info, png)
+
 for idx, target in enumerate(goals):
     # Format: [x, y] or [x, y, yaw]
     goal_name = target["name"]
-    goal_pose = target["pose"] 
+    goal_pose = target["pose"]  
 
     target_x, target_y = goal_pose[0], goal_pose[1]
     target_yaw = goal_pose[2] if len(goal_pose) > 2 else None
 
-    print(f"Driving straight to goal '{goal_name}' at x={target_x}, y={target_y}")
+    print(f"Planning path to goal '{goal_name}' at x={target_x}, y={target_y}")
 
+    # Plan A* path from current robot pose
+    robot_state = json.loads(latest(state)[0])
+    current_pose = robot_state["pose"]
+    path = planner.plan(current_pose, goal_pose)
 
-    # Send straight-line goto command (easy mode)
-    goto_id = idx + 1
-    payload = {
-        "type": "goto",
-        "id": goto_id,
-        "x": target_x,
-        "y": target_y,
-    }
-    if target_yaw is not None:
-        payload["yaw"] = target_yaw
+    if not path:
+        print(f"A* failed to find a path to '{goal_name}'. Skipping...")
+        continue
 
-    cmd.send_json(payload)
+    print(f"A* path found with {len(path)} waypoints. Navigating...")
 
-    # Wait for the simulator to acknowledge the new goto_id
-    acknowledged = False
-    start_wait = time.monotonic()
-    while not acknowledged:
-        robot_state = json.loads(latest(state)[0])
-        goto_info = robot_state["goto"]
-        if goto_info["id"] == goto_id:
-            acknowledged = True
-        elif time.monotonic() - start_wait > 2.0:
-            cmd.send_json(payload)
-            start_wait = time.monotonic()
-        time.sleep(0.01)
+    # Subsample waypoints for smooth stepping (e.g., every 5th waypoint)
+    waypoints = path[::50]
+    if path[-1] not in waypoints:
+        waypoints.append(path[-1])
 
-    # Monitor state stream until reached or bumped
-    while True:
-        robot_state = json.loads(latest(state)[0])
-        goto_info = robot_state["goto"]
-        status = goto_info["status"]
-        pose = robot_state["pose"]
+    goal_failed = False
 
-        print(f"Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Goto status: {status}", end="\r")
+    for wp_idx, (wp_x, wp_y) in enumerate(waypoints):
+        goto_id = (idx + 1) * 100 + wp_idx + 1  # Unique ID for each waypoint
+        is_last_waypoint = (wp_idx == len(waypoints) - 1)
 
-        if goto_info.get("id") == goto_id:
+        # Append final target yaw only on the final waypoint if provided
+        wyaw = goal_pose[2] if (is_last_waypoint and len(goal_pose) > 2) else None
+
+        payload = {"type": "goto", "id": goto_id, "x": wp_x, "y": wp_y}
+        if wyaw is not None:
+            payload["yaw"] = wyaw
+
+        cmd.send_json(payload)
+
+        # Wait for the simulator to acknowledge the new goto_id
+        acknowledged = False
+        start_wait = time.monotonic()
+        while not acknowledged:
+            robot_state = json.loads(latest(state)[0])
+            goto_info = robot_state["goto"]
+            if goto_info["id"] == goto_id:
+                acknowledged = True
+            elif time.monotonic() - start_wait > 2.0:
+                cmd.send_json(payload)
+                start_wait = time.monotonic()
+            time.sleep(0.01)
+
+        # Monitor state stream until the waypoint is reached or bumped
+        has_reached_wp = False
+        while not has_reached_wp:
+            robot_state = json.loads(latest(state)[0])
+            goto_info = robot_state["goto"]
+            status = goto_info["status"]
+            pose = robot_state["pose"]
+
+            print(f"🔄 Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Goto status: {status}", end="\r")
+
+            if goto_info.get("id") != goto_id:
+                time.sleep(0.02)
+                continue  # Ignore other goto commands
+
             if status == "reached":
-                print(f"\nSuccessfully reached goal area for '{goal_name}'! Calling mark_goal...")
-                try:
-                    mark_res, _ = call("mark_goal", name=goal_name)
-                    print(f"Mark goal response for '{goal_name}':", mark_res)
-                except RuntimeError as e:
-                    print(f"Note on mark_goal: {e}")
-                break
+                print(f"\nReached waypoint {wp_idx + 1}/{len(waypoints)} for '{goal_name}'.")
+                has_reached_wp = True
             elif status == "bumped":
-                print(f"\nRobot bumped an obstacle! Executing recovery rotation...")
+                print(f"\nRobot bumped an obstacle while heading to waypoint {wp_idx + 1}/{len(waypoints)}! Executing recovery rotation...")
                 
                 # Rotate in place for 1.5 seconds to back away / clear the bumper sensor
                 recovery_end = time.monotonic() + 1.5
                 while time.monotonic() < recovery_end:
-                    # Send counter-rotating wheel commands at ~20 Hz to respect watchdog[cite: 1]
+                    # Send counter-rotating wheel commands at ~20 Hz to respect watchdog
                     cmd.send_json({"type": "wheels", "left": -turn_wheel_speed, "right": turn_wheel_speed})
                     time.sleep(0.05)
                 
                 # Stop wheels explicitly
                 cmd.send_json({"type": "wheels", "left": 0.0, "right": 0.0})
-                print("Recovery rotation complete. Moving to next goal...")
+                print("Recovery rotation complete. Moving to next waypoint...")
+                goal_failed = False  # Move on to the next waypoint after recovery
                 break
-            elif status == "cancelled" or status == "preempted":
-                print(f"\nGoto was cancelled or preempted for '{goal_name}'.")
-                break
-        time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
-    print("Goal processing complete for ", goal_name, "!\n")
+
+            time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
+
+        if goal_failed:
+            print(f"Failed to reach waypoint {wp_idx + 1}/{len(waypoints)} for '{goal_name}'. Skipping to next goal...")
+            break
+
+    if not goal_failed:
+        print(f"\nSuccessfully arrived at '{goal_name}'! 🎉 Calling mark_goal...")
+        try:
+            mark_res, _ = call("mark_goal", name=goal_name)
+            print(f"Mark goal response: {mark_res}\n")
+        except RuntimeError as e:
+            print(f"Mark goal note: {e}\n")
+    
+    # print("Goal processing complete for ", goal_name, "!\n")
 
 print("####################")
 print("All goals processed!")
 print("####################")
-
-# Load a scene, read the robot and camera info, save the map.
-# robot, _ = call("get_robot_info")
-# cam, _ = call("get_camera_info")
-# map_info, (png,) = call("get_map")
-# Image.open(io.BytesIO(png)).save("map.png")
-# print("map:", map_info)
 
 # # Wheels: rad/s per wheel, resend at 20 Hz (250 ms watchdog). Turn in place at 1 rad/s for 1.5 s.
 # turn_rate = 1.0
