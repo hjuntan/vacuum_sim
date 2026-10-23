@@ -70,6 +70,15 @@ if not goals:
     print("No goals found in this scene.")
     exit(1)
 
+# Get robot dimensions for calculating wheel speeds during rotation
+robot_info, _ = call("get_robot_info")
+wheel_base = robot_info["wheel_base"]
+wheel_radius = robot_info["wheel_radius"]
+
+# Calculate wheel speed for turning in place (e.g., 1.5 rad/s turn rate)
+turn_rate = 1.5
+turn_wheel_speed = turn_rate * wheel_base / 2 / wheel_radius
+
 for idx, target in enumerate(goals):
     # Format: [x, y] or [x, y, yaw]
     goal_name = target["name"]
@@ -94,28 +103,58 @@ for idx, target in enumerate(goals):
 
     cmd.send_json(payload)
 
+    # Wait for the simulator to acknowledge the new goto_id
+    acknowledged = False
+    start_wait = time.monotonic()
+    while not acknowledged:
+        robot_state = json.loads(latest(state)[0])
+        goto_info = robot_state["goto"]
+        if goto_info["id"] == goto_id:
+            acknowledged = True
+        elif time.monotonic() - start_wait > 2.0:
+            cmd.send_json(payload)
+            start_wait = time.monotonic()
+        time.sleep(0.01)
+
     # Monitor state stream until reached or bumped
     while True:
         robot_state = json.loads(latest(state)[0])
-        print("Robot state:", robot_state)
         goto_info = robot_state["goto"]
         status = goto_info["status"]
         pose = robot_state["pose"]
 
         print(f"Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Goto status: {status}", end="\r")
 
-        if status == "reached":
-            print(f"\nRobot reached goal area! Calling mark_goal for '{goal_name}'...")
-            mark_res, _ = call("mark_goal", name=goal_name)
-            print("Mark goal response:", mark_res)
-            break
-        elif status == "bumped":
-            print("\nRobot bumped into an unexpected obstacle!")
-            break
-
+        if goto_info.get("id") == goto_id:
+            if status == "reached":
+                print(f"\nSuccessfully reached goal area for '{goal_name}'! Calling mark_goal...")
+                try:
+                    mark_res, _ = call("mark_goal", name=goal_name)
+                    print(f"Mark goal response for '{goal_name}':", mark_res)
+                except RuntimeError as e:
+                    print(f"Note on mark_goal: {e}")
+                break
+            elif status == "bumped":
+                print(f"\nRobot bumped an obstacle! Executing recovery rotation...")
+                
+                # Rotate in place for 1.5 seconds to back away / clear the bumper sensor
+                recovery_end = time.monotonic() + 1.5
+                while time.monotonic() < recovery_end:
+                    # Send counter-rotating wheel commands at ~20 Hz to respect watchdog[cite: 1]
+                    cmd.send_json({"type": "wheels", "left": -turn_wheel_speed, "right": turn_wheel_speed})
+                    time.sleep(0.05)
+                
+                # Stop wheels explicitly
+                cmd.send_json({"type": "wheels", "left": 0.0, "right": 0.0})
+                print("Recovery rotation complete. Moving to next goal...")
+                break
+            elif status == "cancelled" or status == "preempted":
+                print(f"\nGoto was cancelled or preempted for '{goal_name}'.")
+                break
         time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
+    print("Goal processing complete for ", goal_name, "!\n")
 
-    print("\nAll goals processed!")
+print("\nAll goals processed!")
 
 # Load a scene, read the robot and camera info, save the map.
 # robot, _ = call("get_robot_info")
