@@ -105,7 +105,7 @@ class Controller:
             return False
 
         print(f"A* fallback path found with {len(path)} waypoints. Navigating...")
-        waypoints = path[::5]
+        waypoints = self.optimize_path(current_pose, path, planner)
         if path[-1] not in waypoints:
             waypoints.append(path[-1])
 
@@ -115,6 +115,26 @@ class Controller:
             self.mark_goal(goal_name)
 
         return navigation_success
+
+    def optimize_path(self, current_pose, path, planner):
+        """Greedily prunes redundant waypoints along clear straight lines to minimize goto commands."""
+        if not path:
+            return []
+        
+        optimized = []
+        i = 0
+        while i < len(path):
+            best_j = i
+            # Look as far ahead in the path as possible to find the furthest safe line-of-sight node
+            for j in range(len(path) - 1, i, -1):
+                start_p = {"x": path[i][0], "y": path[i][1]}
+                target_pose = [path[j][0], path[j][1]]
+                if planner.is_line_safe(start_p, target_pose):
+                    best_j = j
+                    break
+            optimized.append(path[best_j])
+            i = best_j + 1  # Jump straight to the furthest reachable point
+        return optimized
 
     """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
     def navigate_waypoints(self, goal_idx, goal_name, waypoints, goal_pose):
