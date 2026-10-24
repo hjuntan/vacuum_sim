@@ -25,12 +25,46 @@ def main():
 
     # List the available scenes
     scenes, _ = client.call("list_scenes")
-    print("Available scenes:", [s["id"] for s in scenes])
+    if not scenes:
+        print("Error: No scenes available from the simulator.")
+        return
+    
+    print("--- Available Scenes ---")
+    print(" ID |      Name       ")
+    for idx, s in enumerate(scenes):
+        print(f" {s['id']} | {s['name']} ")
 
-    # Load scene 01 with a fixed seed
-    scene, _ = client.call("load_scene", id="01", seed=42)
-    start_pose = scene["start"]
-    print(f"Start Pose: {start_pose}")
+    default_scene_id = scenes[0]["id"]
+    scene_choice = input(f"\nSelect a scene index (1-{len(scenes)}) or type the Scene ID [default: {default_scene_id}]: ").strip()
+
+    selected_scene_id = default_scene_id
+    if scene_choice:
+        if scene_choice.isdigit() and 1 <= int(scene_choice) <= len(scenes):
+            selected_scene_id = scenes[int(scene_choice) - 1].get('id', scenes[int(scene_choice) - 1]) if isinstance(scenes[int(scene_choice) - 1], dict) else scenes[int(scene_choice) - 1]
+        else:
+            # Check if input matches any scene ID directly
+            matching = [s for s in scenes if (s.get('id') if isinstance(s, dict) else s) == scene_choice]
+            if matching:
+                selected_scene_id = scene_choice
+            else:
+                print(f"⚠️ Invalid choice '{scene_choice}'. Defaulting to scene '{selected_scene_id}'.")
+
+    default_seed = 42
+    seed_input = input(f"Enter a seed for the scene (default: {default_seed}): ").strip()
+
+    selected_seed = default_seed
+    if seed_input:
+        if seed_input.isdigit():
+            selected_seed = int(seed_input)
+        else:
+            print(f"Defaulting to seed {default_seed}.")
+
+    print(f"\nLoading scene '{selected_scene_id}' with seed {selected_seed}...")
+    scene, _ = client.call("load_scene", id=selected_scene_id, seed=selected_seed)
+    print(f"Start Pose: {scene['start']}")
+
+    # start_pose = scene["start"]
+    # print(f"Start Pose: {start_pose}")
 
     # Get map, robot and camera data
     map_info, (png,) = client.call("get_map")
