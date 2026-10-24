@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 
 class Planner:
-    def __init__(self, map_info, png):
+    def __init__(self, map_info, png, robot_diameter=0.34, leeway=0.075):
         self.resolution = map_info["resolution"]
 
         # Row 0 is the top of the image (largest y); rows grow towards −y, columns towards +x.
@@ -16,6 +16,27 @@ class Planner:
         
         self.grid = np.array(Image.open(BytesIO(png)))
         self.width, self.height = map_info["width"], map_info["height"]
+
+        robot_radius = robot_diameter / 2.0
+        self.radius = robot_radius + leeway
+
+        radius_px = math.ceil(self.radius / self.resolution)
+        self.footprint = [
+            (dr, dc) for dr in range(-radius_px, radius_px + 1)
+            for dc in range(-radius_px, radius_px + 1)
+            if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius
+        ]
+
+    def is_safe_to_occupy(self, row, col):
+        """Check if the robot can safely occupy the cell at (row, col) considering its footprint."""
+        for dr, dc in self.footprint:
+            r, c = row + dr, col + dc
+            if r < 0 or r >= self.height or c < 0 or c >= self.width:
+                return False  # Out of bounds
+            if self.grid[r, c] > 127:  # Occupied cell
+                return False
+        return True
+
 
     def map_to_world(self, row, col):
         """Convert map coordinates (pixels) to world coordinates (m)."""
@@ -35,15 +56,18 @@ class Planner:
         goal_row, goal_col = self.world_to_map(goal[0], goal[1])
 
         # If start or goal is inside an obstacle, return empty path
-        if self.grid[start_row, start_col] > 127 or self.grid[goal_row, goal_col] > 127:
+        if not self.is_safe_to_occupy(start_row, start_col) or not self.is_safe_to_occupy(goal_row, goal_col):
             return []
 
+        # h(n) = Euclidean distance heuristic
         def heuristic(a, b):
             return math.hypot(a[0] - b[0], a[1] - b[1])
 
         open_set = []
         heapq.heappush(open_set, (0, start_row, start_col))
-        came_from = {}
+        came_from = {} # For backtracking
+
+        # g(n) = cost from start to current node
         g_score = {(start_row, start_col): 0}
 
         # 8-connected grid neighbors (orthogonal and diagonal)
@@ -63,17 +87,22 @@ class Planner:
 
             for dr, dc in neighbors:
                 neighbor_row, neighbor_col = current_row + dr, current_col + dc
-                if 0 <= neighbor_row < self.height and 0 <= neighbor_col < self.width:
-                    if self.grid[neighbor_row, neighbor_col] > 127:
-                        continue  # Skip obstacles
 
-                    move_cost = math.hypot(dr, dc)
-                    tentative_g = g_score[(current_row, current_col)] + move_cost
+                if neighbor_row < 0 or neighbor_row >= self.height or neighbor_col < 0 or neighbor_col >= self.width:
+                    continue  # Skip out-of-bounds neighbors
 
-                    if tentative_g < g_score.get((neighbor_row, neighbor_col), float("inf")):
-                        came_from[(neighbor_row, neighbor_col)] = (current_row, current_col)
-                        g_score[(neighbor_row, neighbor_col)] = tentative_g
-                        f_score = tentative_g + heuristic((neighbor_row, neighbor_col), (goal_row, goal_col))
-                        heapq.heappush(open_set, (f_score, neighbor_row, neighbor_col))
+                if not self.is_safe_to_occupy(neighbor_row, neighbor_col):
+                    continue  # Skip occupied neighbors
+
+                move_cost = math.hypot(dr, dc)
+                tentative_g = g_score[(current_row, current_col)] + move_cost # g(n)
+
+                if tentative_g < g_score.get((neighbor_row, neighbor_col), float("inf")):
+                    came_from[(neighbor_row, neighbor_col)] = (current_row, current_col)
+                    g_score[(neighbor_row, neighbor_col)] = tentative_g
+
+                    # f(n) = g(n) + h(n)
+                    f_score = tentative_g + heuristic((neighbor_row, neighbor_col), (goal_row, goal_col))
+                    heapq.heappush(open_set, (f_score, neighbor_row, neighbor_col))
 
         return []  # No path found

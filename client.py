@@ -106,7 +106,7 @@ for idx, target in enumerate(goals):
     print(f"A* path found with {len(path)} waypoints. Navigating...")
 
     # Subsample waypoints for smooth stepping (e.g., every 5th waypoint)
-    waypoints = path[::50]
+    waypoints = path[::5]
     if path[-1] not in waypoints:
         waypoints.append(path[-1])
 
