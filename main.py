@@ -32,12 +32,13 @@ def main():
     start_pose = scene["start"]
     print(f"Start Pose: {start_pose}")
 
-    # Get map & robot data
+    # Get map, robot and camera data
     map_info, (png,) = client.call("get_map")
     robot_info, _ = client.call("get_robot_info")
+    camera_info, _ = client.call("get_camera_info")
 
     # Initialize the controller and planner
-    controller = Controller(client, robot_info)
+    controller = Controller(client, robot_info, camera_info)
     planner = Planner(map_info, png)
 
     # Get available goals
@@ -61,40 +62,14 @@ def main():
     for idx, target in enumerate(goals):
         # Format: [x, y] or [x, y, yaw]
         goal_name = target["name"]
-        goal_pose = target["pose"]  
+        goal_pose = target["pose"]
 
-        target_x, target_y = goal_pose[0], goal_pose[1]
-        target_yaw = goal_pose[2] if len(goal_pose) > 2 else None
-
-        print(f"Planning path to goal '{goal_name}' at x={target_x}, y={target_y}")
-
-        # Plan A* path from current robot pose
         robot_state = client.latest_state()
         current_pose = robot_state["pose"]
-        path = planner.plan(current_pose, goal_pose)
+        
+        controller.execute_goal_mission(idx, goal_name, goal_pose, planner, current_pose=current_pose)
 
-        if not path:
-            print(f"A* failed to find a path to '{goal_name}'. Skipping...")
-            continue
-
-        print(f"A* path found with {len(path)} waypoints. Navigating...")
-
-        # Subsample waypoints for smooth stepping (e.g., every 5th waypoint)
-        waypoints = path[::5]
-        if path[-1] not in waypoints:
-            waypoints.append(path[-1])
-
-        planned_success = controller.navigate_path(idx, goal_name, waypoints, goal_pose)
-
-        if planned_success:
-            print(f"\nSuccessfully arrived at '{goal_name}'! 🎉 Calling mark_goal...")
-            try:
-                mark_res, _ = client.call("mark_goal", name=goal_name)
-                print(f"Mark goal response: {mark_res}\n")
-            except RuntimeError as e:
-                print(f"Mark goal note: {e}\n")
-
-    print("####################")
+    print("\n####################")
     print("All goals processed!")
     print("####################")
 

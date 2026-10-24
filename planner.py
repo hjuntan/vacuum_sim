@@ -37,6 +37,21 @@ class Planner:
                 return False
         return True
 
+    def is_line_safe(self, start_pose, goal_pose, step_size=0.05):
+        """Check if the straight line from start_pose to goal_pose is free of obstacles."""
+        start_row, start_col = self.world_to_map(start_pose["x"], start_pose["y"])
+        goal_row, goal_col = self.world_to_map(goal_pose[0], goal_pose[1])
+
+        distance = math.hypot(goal_pose[0] - start_pose["x"], goal_pose[1] - start_pose["y"])
+        num_steps = max(1, int(distance / step_size))
+
+        for i in range(num_steps + 1):
+            t = i / num_steps
+            r = int(start_row + t * (goal_row - start_row))
+            c = int(start_col + t * (goal_col - start_col))
+            if not self.is_safe_to_occupy(r, c):
+                return False
+        return True
 
     def map_to_world(self, row, col):
         """Convert map coordinates (pixels) to world coordinates (m)."""
