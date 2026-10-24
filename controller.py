@@ -9,7 +9,7 @@ class Controller:
         turn_rate = 1.5
         self.turn_wheel_speed = turn_rate * robot_info["wheel_base"] / 2 / robot_info["wheel_radius"]
 
-    def is_path_clear(self, target_distance):
+    def is_path_clear(self, target_distance, leeway=0.05):
         if not self.camera_info:
             print("Warning: No camera info provided. Assuming path is clear.")
             return True
@@ -20,7 +20,8 @@ class Controller:
             h, w = depth.shape
             center_region = depth[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
             valid = center_region[center_region > 0.05]
-            if valid.size > 0 and np.min(valid) < min(target_distance, 2.0):
+
+            if valid.size > 0 and np.min(valid) <= min(target_distance + leeway, 2.0):
                 return False
         except Exception as e:
             pass
@@ -31,9 +32,15 @@ class Controller:
 
         print(f"Planning path to goal '{goal_name}' at x={target_x}, y={target_y}")
 
+        # Orient the robot to face the goal before performing the camera check
+        target_yaw = math.atan2(target_y - current_pose["y"], target_x - current_pose["x"])
+        print(f"Orienting robot to face goal at yaw {target_yaw:.2f}...")
+        self.rotate_to(target_yaw)
+        time.sleep(0.2)  # Brief pause to let camera stream settle
+
         dist_to_goal = math.hypot(target_x - current_pose["x"], target_y - current_pose["y"]) if current_pose else None
 
-        # Dual Gatekeeper check
+        # Check if the direct path is clear using both the map and camera data
         map_clear = planner.is_line_safe(current_pose, goal_pose) if current_pose else False
         camera_clear = self.is_path_clear(dist_to_goal)
 
@@ -75,7 +82,7 @@ class Controller:
             status = goto_info["status"]
             pose = robot_state["pose"]
 
-            print(f"🔄 Direct path | Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Status: {status}", end="\r")
+            print(f"🔄 Direct path | Pose: x={pose['x']:.2f}, y={pose['y']:.2f}, yaw={pose['yaw']:.2f} | Status: {status}", end="\r")
 
             if goto_info.get("id") == goto_id:
                 if status == "reached":
@@ -101,10 +108,10 @@ class Controller:
         path = planner.plan(current_pose, goal_pose)
 
         if not path:
-            print(f"❌ A* fallback failed to find a path to '{goal_name}'. Skipping...")
+            print(f"❌ A* failed to find a path to '{goal_name}'. Skipping...")
             return False
 
-        print(f"A* fallback path found with {len(path)} waypoints. Navigating...")
+        print(f"A* path found with {len(path)} waypoints. Navigating...")
         waypoints = self.optimize_path(current_pose, path, planner)
         if path[-1] not in waypoints:
             waypoints.append(path[-1])
@@ -176,7 +183,7 @@ class Controller:
             status = goto_info["status"]
             pose = robot_state["pose"]
 
-            print(f"🔄 Pose: x={pose['x']:.2f}, y={pose['y']:.2f} | Goto status: {status}", end="\r")
+            print(f"🔄 Pose: x={pose['x']:.2f}, y={pose['y']:.2f}, yaw={pose['yaw']:.2f} | Goto status: {status}", end="\r")
 
             if goto_info.get("id") != goto_id:
                 time.sleep(0.02)
@@ -199,9 +206,31 @@ class Controller:
         """Rotate in place to clear the bumper sensor[cite: 1]."""
         recovery_end = time.monotonic() + 1.5
         while time.monotonic() < recovery_end:
-            self.client.send_wheel(-self.turn_wheel_speed, self.turn_wheel_speed)
+            self.client.send_wheels(-self.turn_wheel_speed, self.turn_wheel_speed)
             time.sleep(0.05)
-        self.client.send_wheel(0.0, 0.0)
+        self.client.send_wheels(0.0, 0.0)
+
+    def normalize_angle(self, angle):
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def rotate_to(self, target_yaw, tolerance=0.02, timeout=5.0):
+        """Rotate the robot to a specific yaw angle (in radians) with a given tolerance."""
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < timeout:
+            robot_state = self.client.latest_state()
+            current_yaw = robot_state["pose"]["yaw"]
+            angle_diff = self.normalize_angle(target_yaw - current_yaw)
+
+            if abs(angle_diff) <= tolerance:
+                self.client.send_wheels(0.0, 0.0)
+                return True  # Successfully rotated to target yaw
+
+            turn_direction = -1.0 if angle_diff > 0 else 1.0
+            self.client.send_wheels(turn_direction * self.turn_wheel_speed, -turn_direction * self.turn_wheel_speed)
+            time.sleep(0.05)
+
+        self.client.send_wheels(0.0, 0.0)
+        return False  # Failed to rotate within the timeout
 
     def mark_goal(self, goal_name):
         """Mark goal as reached via RPC[cite: 1]."""

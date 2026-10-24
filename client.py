@@ -55,7 +55,7 @@ class Client:
             payload["yaw"] = yaw
         self.cmd.send_json(payload)
 
-    def send_wheel(self, left, right):
-        """Send a wheel command."""
-        payload = {"type": "wheel", "left": left, "right": right}
+    def send_wheels(self, left, right):
+        """Send wheels command."""
+        payload = {"type": "wheels", "left": left, "right": right}
         self.cmd.send_json(payload)

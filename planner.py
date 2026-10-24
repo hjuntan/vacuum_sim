@@ -2,9 +2,11 @@
 
 import heapq
 import math
+import numpy as np
+
 from io import BytesIO
 from PIL import Image
-import numpy as np
+from scipy.ndimage import binary_dilation
 
 class Planner:
     def __init__(self, map_info, png, robot_diameter=0.34, leeway=0.075):
@@ -14,28 +16,30 @@ class Planner:
         # 0 = free, 255 = occupied
         self.origin = map_info["origin"]
         
-        self.grid = np.array(Image.open(BytesIO(png)))
+        grid = np.array(Image.open(BytesIO(png)))
         self.width, self.height = map_info["width"], map_info["height"]
 
         robot_radius = robot_diameter / 2.0
         self.radius = robot_radius + leeway
 
+        # Create a circular structuring element (footprint mask) for C-Space dilation
         radius_px = math.ceil(self.radius / self.resolution)
-        self.footprint = [
-            (dr, dc) for dr in range(-radius_px, radius_px + 1)
-            for dc in range(-radius_px, radius_px + 1)
-            if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius
-        ]
+        y, x = np.ogrid[-radius_px:radius_px+1, -radius_px:radius_px+1]
+        structuring_element = x**2 + y**2 <= (radius_px)**2
+
+        # PRECOMPUTE: Dilate obstacles once using C-optimized SciPy binary dilation.
+        # This permanently expands walls outward by the robot's full safety footprint.
+        obstacles = grid > 127
+        inflated_obstacles = binary_dilation(obstacles, structure=structuring_element)
+
+        self.grid = np.zeros_like(grid)
+        self.grid[inflated_obstacles] = 255
 
     def is_safe_to_occupy(self, row, col):
         """Check if the robot can safely occupy the cell at (row, col) considering its footprint."""
-        for dr, dc in self.footprint:
-            r, c = row + dr, col + dc
-            if r < 0 or r >= self.height or c < 0 or c >= self.width:
-                return False  # Out of bounds
-            if self.grid[r, c] > 127:  # Occupied cell
-                return False
-        return True
+        if not (0 <= row < self.height and 0 <= col < self.width):
+            return False
+        return self.grid[row, col] <= 127
 
     def is_line_safe(self, start_pose, goal_pose, step_size=0.05):
         """Check if the straight line from start_pose to goal_pose is free of obstacles."""
