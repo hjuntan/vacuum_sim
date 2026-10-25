@@ -277,12 +277,22 @@ class Planner:
                 return False
         return True
 
-    def visualize(self, robot_pose=None, path=None, current_goal=None, trajectory=None, is_direct_path=False, start_pose=None):
+    def visualize(self, robot_pose=None, path=None, current_goal=None, trajectory=None, is_direct_path=False, start_pose=None, all_goals=None):
         """Render the live occupancy grid map and robot position using OpenCV."""
         import cv2
         # Copy grid and convert to BGR color for overlays
         img = self.visual_grid.copy().astype(np.uint8)
         img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        if all_goals:
+            for g in all_goals:
+                g_name = g["name"]
+                g_pose = g["pose"]
+
+                gx, gy = g_pose[0], g_pose[1]
+                gr, gc = self.world_to_map(gx, gy)
+                cv2.circle(img_bgr, (gc, gr), 4, (100, 150, 255), -1)
+                cv2.putText(img_bgr, g_name, (gc + 6, gr + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 220, 255), 1, cv2.LINE_AA)
 
         # Draw A* path if available (Blue line)
         if is_direct_path:

@@ -90,6 +90,9 @@ def main():
         recorder.stop()
         return
 
+    # Show all available goals visually
+    planner.visualize(all_goals=goals)
+
     # 🌟 Continuous goal selection loop by name
     try:
         while True:
