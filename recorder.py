@@ -6,6 +6,7 @@ import io
 import numpy as np
 from PIL import Image
 import cv2
+import zmq
 
 class Recorder:
     def __init__(self, client, output_dir="recordings"):
@@ -15,6 +16,13 @@ class Recorder:
         self.thread = None
         self.frame_count = 0
         self.session_dir = None
+
+        # 🛡️ Create an independent, dedicated ZMQ SUB socket for the recorder thread
+        # This prevents the recorder and controller from competing for messages on client.camera
+        self.camera_sub = client.ctx.socket(zmq.SUB)
+        self.camera_sub.setsockopt(zmq.RCVHWM, 2)
+        self.camera_sub.connect(f"tcp://{client.host}:{client.port_base + 3}")
+        self.camera_sub.setsockopt(zmq.SUBSCRIBE, b"")
 
     def start(self):
         """Start recording the camera stream"""
@@ -48,9 +56,17 @@ class Recorder:
         try:
             while self.is_recording:
                 try:
-                    # Fetch latest camera multipart message (header, jpg, raw depth)
-                    header, jpg, raw = self.client.latest_camera()
-                    header = json.loads(header)
+                    # Fetch latest camera multipart message from dedicated recorder socket ("latest wins")
+                    msg = self.camera_sub.recv_multipart()
+                    while self.camera_sub.poll(0):
+                        msg = self.camera_sub.recv_multipart()
+                    
+                    if not msg or len(msg) < 3:
+                        time.sleep(0.01)
+                        continue
+
+                    header_bytes, jpg_bytes, raw_bytes = msg[0], msg[1], msg[2]
+                    header = json.loads(header_bytes.decode("utf-8") if isinstance(header_bytes, bytes) else header_bytes)
                     
                     seq = header["seq"]
                     t = header["t"]
@@ -59,11 +75,11 @@ class Recorder:
                     height = header["height"]
                     
                     # Process and write RGB frame to MP4 video
-                    img_rgb = np.array(Image.open(io.BytesIO(jpg)))
+                    img_rgb = np.array(Image.open(io.BytesIO(jpg_bytes)))
                     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                     
                     # Process Depth frame into Depth Video
-                    depth = np.frombuffer(raw, dtype="<u2").reshape(height, width)
+                    depth = np.frombuffer(raw_bytes, dtype="<u2").reshape(height, width)
 
                     # Normalize depth (0 to 6000 mm) to 0-255 range for 8-bit video visualization
                     depth_norm = np.clip(depth / 6000.0 * 255.0, 0, 255).astype(np.uint8)
@@ -77,7 +93,7 @@ class Recorder:
                     rgb_writer.write(img_bgr)
                     depth_writer.write(depth_color)
                     
-                    # 3. Write synchronization metadata record for offline processing
+                    # Write synchronization metadata record for offline processing
                     meta_entry = {
                         "seq": seq,
                         "t": t,
@@ -108,5 +124,9 @@ class Recorder:
         self.is_recording = False
         if self.thread:
             self.thread.join(timeout=2.0)
+        try:
+            self.camera_sub.close()
+        except Exception:
+            pass
         print(f"🛑 Camera recording stopped. Total frames recorded: {self.frame_count}")
         print(f"files saved in: {self.session_dir}")

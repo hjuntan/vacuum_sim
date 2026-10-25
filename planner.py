@@ -139,8 +139,6 @@ class Planner:
 
     def mark_obstacle_from_camera(self, depth, camera_info, robot_pose):
         """Reset dynamic map to base and project close-range camera obstacles (0.35m to 1.2m)."""
-        self.grid = self.base_grid.copy()
-
         h, w = depth.shape
         x, y = robot_pose["x"], robot_pose["y"]
         fx, fy, cx, cy = camera_info["fx"], camera_info["fy"], camera_info["cx"], camera_info["cy"]
@@ -149,14 +147,15 @@ class Planner:
         yaw = robot_pose["yaw"]
         cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
 
-        v_min, v_max = int(h * 0.2), int(h * 0.5)
-        u_min, u_max = int(w * 0.3), int(w * 0.7)
+        # Exclude top rows (ceiling/sky) and bottom rows (floor plane)
+        v_min, v_max = int(h * 0.35), int(h * 0.75)
+        u_min, u_max = int(w * 0.2), int(w * 0.8)
 
-        valid_world_points = []
-        for v in range(v_min, v_max, 2):
-            for u in range(u_min, u_max, 2):
+        # Loop through pixels with a step of 4 for efficiency
+        for v in range(0, h, 4):
+            for u in range(0, w, 4):
                 z = depth[v, u]
-                if z == 0 or z < 0.35 or z > 1.2:
+                if z == 0 or z > 0.5: # Only mark obstacles that is 50cm away of the camera
                     continue
 
                 x_camera = (u - cx) * z / fx
@@ -166,27 +165,20 @@ class Planner:
                 p_robot = T_base_camera @ p_camera
 
                 height_z = p_robot[2]
-                if height_z < 0.05 or height_z > 0.8:
+                if height_z < 0.05 or height_z > 0.20: # Obstacles not on the map are at least 8cm tall
                     continue
 
                 x_world = x + cos_yaw * p_robot[0] - sin_yaw * p_robot[1]
                 y_world = y + sin_yaw * p_robot[0] + cos_yaw * p_robot[1]
-                valid_world_points.append((x_world, y_world))
 
-        map_points = [self.world_to_map(xw, yw) for xw, yw in valid_world_points]
-
-        cell_counts = {}
-        for r, c in map_points:
-            if 0 <= r < self.height and 0 <= c < self.width:
-                cell_counts[(r, c)] = cell_counts.get((r, c), 0) + 1
-
-        for (r, c), count in cell_counts.items():
-            if count >= 3:
-                for dr in range(-self.radius_px, self.radius_px + 1):
-                    for dc in range(-self.radius_px, self.radius_px + 1):
-                        nr, nc = r + dr, c + dc
-                        if 0 <= nr < self.height and 0 <= nc < self.width:
-                            if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius:
+                r, c = self.world_to_map(x_world, y_world)
+                obstacle_radius_px = int(0.5 * self.radius_px)
+                if 0 <= r < self.height and 0 <= c < self.width:
+                    for dr in range(-obstacle_radius_px, obstacle_radius_px + 1):
+                        for dc in range(-obstacle_radius_px, obstacle_radius_px + 1):
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < self.height and 0 <= nc < self.width:
+                                self.base_grid[nr, nc] = 255
                                 self.grid[nr, nc] = 255
 
     def mark_obstacle_from_bumper(self, robot_pose):
@@ -201,15 +193,14 @@ class Planner:
         obs_y = y + robot_radius * math.sin(yaw)
         
         r, c = self.world_to_map(obs_x, obs_y)
-        if 0 <= r < self.height and 0 <= c < self.width: # note: self.width
-            # Inflate with robot radius footprint so future paths steer clear of it
-            for dr in range(-self.radius_px, self.radius_px + 1):
-                for dc in range(-self.radius_px, self.radius_px + 1):
+        obstacle_radius_px = int(0.5 * self.radius_px)
+        if 0 <= r < self.height and 0 <= c < self.width:
+            for dr in range(-obstacle_radius_px, obstacle_radius_px + 1):
+                for dc in range(-obstacle_radius_px, obstacle_radius_px + 1):
                     nr, nc = r + dr, c + dc
                     if 0 <= nr < self.height and 0 <= nc < self.width:
-                        if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius:
-                            self.base_grid[nr, nc] = 255
-                            self.grid[nr, nc] = 255
+                        self.base_grid[nr, nc] = 255
+                        self.grid[nr, nc] = 255
                             
         print(f"🛑 Bumper hit! Permanently marked perimeter obstacle at ({obs_x:.2f}, {obs_y:.2f})")
     

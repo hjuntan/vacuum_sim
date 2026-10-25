@@ -107,7 +107,7 @@ class Controller:
                 elif status == "bumped":
                     print(f"\n💥 Robot bumped an obstacle! Marking and recovering...")
                     # Precisely mark the obstacle using the robot pose at the moment of impact
-                    self.planner.mark_obstacle_from_bumper(pose)
+                    self.update_map_from_camera()
                     self.execute_recovery(goal_pose)
                     print("Recovery rotation complete. Switching to A* planner...")
                     break
@@ -122,7 +122,7 @@ class Controller:
     def navigate_A_star_path(self, current_pose, goal_idx, goal_name, goal_pose):
         max_attempts = 20
         for attempt in range(max_attempts):
-            # self.update_map_from_camera()
+            self.update_map_from_camera()
 
             robot_state = self.client.latest_state()
             current_pose = robot_state["pose"]
@@ -229,71 +229,6 @@ class Controller:
             time.sleep(0.02)
 
         self.client.send_wheels(0.0, 0.0)
-        return True
-
-        for idx, (wx, wy) in enumerate(waypoints):
-            print(f"Waypoint {idx + 1}/{len(waypoints)}: heading to ({wx:.2f}, {wy:.2f})")
-            
-            while True:
-                robot_state = self.client.latest_state()
-                pose = robot_state["pose"]
-                x, y, yaw = pose["x"], pose["y"], pose["yaw"]
-
-                # Check bumper collision during movement
-                if robot_state["bumper"]:
-                    print(f"\n💥 Bumper collision detected during smooth wheel navigation!")
-                    self.planner.mark_obstacle_from_bumper(pose)
-                    self.execute_recovery(goal_pose)
-                    return False
-
-                # Dynamically update map from camera observations on the fly
-                # self.update_map_from_camera()
-
-                # Calculate distance and angle error to current waypoint
-                dx = wx - x
-                dy = wy - y
-                dist = math.hypot(dx, dy)
-
-                # Waypoint reached tolerance (5cm threshold)
-                if dist < 0.05:
-                    break
-
-                target_angle = math.atan2(dy, dx)
-                angle_error = target_angle - yaw
-                # Normalize angle error to [-pi, pi]
-                angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
-
-                # Smooth velocity profiling: slow down linear speed during sharp turns
-                linear_speed = max_linear_speed * max(0.15, math.cos(angle_error))
-                if abs(angle_error) > 0.8:  # Sharp turn threshold
-                    linear_speed = 0.05
-
-                # Proportional steering controller for angular velocity
-                angular_speed = 2.5 * angle_error
-                angular_speed = max(-max_angular_speed, min(max_angular_speed, angular_speed))
-
-                # Convert linear & angular velocities to left/right wheel speeds (rad/s)
-                v_center = linear_speed / wheel_radius
-                omega = angular_speed
-
-                v_l = v_center - (omega * track_width / (2.0 * wheel_radius))
-                v_r = v_center + (omega * track_width / (2.0 * wheel_radius))
-
-                # Stream continuous smooth wheel commands
-                self.client.send_wheels(v_l, v_r)
-                
-                # Live visualization
-                self.planner.visualize(robot_pose=pose, path=waypoints, current_goal=goal_pose, start_pose=current_pose)
-                time.sleep(0.05)
-
-        # Stop robot after completing final waypoint
-        self.client.send_wheels(0.0, 0.0)
-        print(f"✅ Successfully navigated all waypoints for '{goal_name}' with smooth motion!")
-
-        # Align to target yaw orientation if specified in goal_pose
-        if goal_pose and len(goal_pose) > 2 and goal_pose[2] is not None:
-            self.rotate_to(goal_pose)
-        
         return True
 
     def update_map_from_camera(self):
