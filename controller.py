@@ -8,6 +8,7 @@ class Controller:
         self.client = client
         self.camera_info = camera_info
         self.planner = planner
+        self.robot_info = robot_info
         turn_rate = 0.8
         self.turn_wheel_speed = turn_rate * robot_info["wheel_base"] / 2 / robot_info["wheel_radius"]
 
@@ -106,7 +107,7 @@ class Controller:
                 continue
 
             print(f"A* path found with {len(path)} waypoints. Navigating...")
-            waypoints = self.optimize_path(current_pose, path)
+            waypoints = self.planner.optimize_path(current_pose, path)
             if path[-1] not in waypoints:
                 waypoints.append(path[-1])
 
@@ -122,55 +123,71 @@ class Controller:
         print(f"❌ Failed to reach goal '{goal_name}' after {max_attempts} attempts.")
         return False
 
-    def optimize_path(self, current_pose, path):
-        """Greedily prunes redundant waypoints along clear straight lines to minimize goto commands."""
-        if not path:
-            return []
-        
-        optimized = []
-        i = 0
-        while i < len(path):
-            best_j = i
-            # Look as far ahead in the path as possible to find the furthest safe line-of-sight node
-            for j in range(len(path) - 1, i, -1):
-                start_p = {"x": path[i][0], "y": path[i][1]}
-                target_pose = [path[j][0], path[j][1]]
-                if self.planner.is_line_safe(start_p, target_pose):
-                    best_j = j
-                    break
-            optimized.append(path[best_j])
-            i = best_j + 1  # Jump straight to the furthest reachable point
-        return optimized
-
     """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
     def navigate_waypoints(self, goal_idx, goal_name, waypoints, goal_pose):
-        for wp_idx, (wp_x, wp_y) in enumerate(waypoints):
-            goto_id = (goal_idx + 1) * 100 + wp_idx + 1  # Unique ID for each waypoint
-            is_last_waypoint = (wp_idx == len(waypoints) - 1)
+        track_width = self.robot_info["radius"] * 2.0        # Robot width matching simulator specs
+        wheel_radius = self.robot_info["wheel_radius"]      # Standard simulator wheel radius
+        max_linear_speed = self.robot_info["max_linear_speed"]   # Max forward speed (m/s)
+        max_angular_speed = self.robot_info["max_angular_speed"]   # Max turning speed (rad/s)
 
-            # Append final target yaw only on the final waypoint if provided
-            wyaw = goal_pose[2] if (is_last_waypoint and len(goal_pose) > 2) else None
-
-            self.client.send_goto(goto_id, wp_x, wp_y, yaw=wyaw)
-
-            # Wait for the simulator to acknowledge the new goto_id
-            acknowledged = False
-            start_wait = time.monotonic()
-            while not acknowledged:
-                robot_state = self.client.latest_state()
-                goto_info = robot_state["goto"]
-                if goto_info["id"] == goto_id:
-                    acknowledged = True
-                elif time.monotonic() - start_wait > 2.0:
-                    self.client.send_goto(goto_id, wp_x, wp_y, yaw=wyaw)
-                    start_wait = time.monotonic()
-                time.sleep(0.01)
-
-            # Monitor the waypoint until reached or bumped
-            if not self.monitor_waypoint(goto_id, goal_name, wp_idx, len(waypoints)):
-                print(f"❌ Navigation to waypoint {wp_idx + 1}/{len(waypoints)} failed due to bump. Aborting path navigation.")
-                return False  # Indicate that the navigation failed due to a bump
+        for idx, (wx, wy) in enumerate(waypoints):
+            print(f"Waypoint {idx + 1}/{len(waypoints)}: heading to ({wx:.2f}, {wy:.2f})")
             
+            while True:
+                robot_state = self.client.latest_state()
+                pose = robot_state["pose"]
+                x, y, yaw = pose["x"], pose["y"], pose["yaw"]
+
+                # Check bumper collision during movement
+                if robot_state.get("bumped", False):
+                    print(f"\n💥 Bumper collision detected during smooth wheel navigation!")
+                    self.planner.mark_obstacle_from_bumper(pose)
+                    self.execute_recovery()
+                    return False
+
+                # Dynamically update map from camera observations on the fly
+                # self.update_map_from_camera()
+
+                # Calculate distance and angle error to current waypoint
+                dx = wx - x
+                dy = wy - y
+                dist = math.hypot(dx, dy)
+
+                # Waypoint reached tolerance (15cm threshold)
+                if dist < 0.15:
+                    break
+
+                target_angle = math.atan2(dy, dx)
+                angle_error = target_angle - yaw
+                # Normalize angle error to [-pi, pi]
+                angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
+
+                # Smooth velocity profiling: slow down linear speed during sharp turns
+                linear_speed = max_linear_speed * max(0.15, math.cos(angle_error))
+                if abs(angle_error) > 0.8:  # Sharp turn threshold
+                    linear_speed = 0.05
+
+                # Proportional steering controller for angular velocity
+                angular_speed = 2.5 * angle_error
+                angular_speed = max(-max_angular_speed, min(max_angular_speed, angular_speed))
+
+                # Convert linear & angular velocities to left/right wheel speeds (rad/s)
+                v_center = linear_speed / wheel_radius
+                omega = angular_speed
+
+                v_l = v_center - (omega * track_width / (2.0 * wheel_radius))
+                v_r = v_center + (omega * track_width / (2.0 * wheel_radius))
+
+                # Stream continuous smooth wheel commands
+                self.client.send_wheels(v_l, v_r)
+                
+                # Live visualization
+                self.planner.visualize(robot_pose=pose, path=waypoints)
+                time.sleep(0.05)
+
+        # Stop robot after completing final waypoint
+        self.client.send_wheels(0.0, 0.0)
+        print(f"✅ Successfully navigated all waypoints for '{goal_name}' with smooth motion!")
         return True
 
     def monitor_waypoint(self, goto_id, goal_name, wp_idx, num_waypoints):
@@ -219,11 +236,19 @@ class Controller:
 
     def execute_recovery(self):
         """Rotate in place to clear the bumper sensor."""
-        reverse_end = time.monotonic() + 2.0
-        while time.monotonic() < reverse_end:
-            self.client.send_wheels(-2.0, -2.0)  # Both wheels backward
-            time.sleep(0.05)
+        wheel_radius = self.robot_info["radius"]
+        wheel_base = self.robot_info["wheel_base"]
+        
+        target_reverse_distance = 0.17 + 0.10
+        linear_speed = 0.25 # m/s 
+        rev_wheel_speed = linear_speed / wheel_radius
 
+        reverse_time = target_reverse_distance / linear_speed
+        reverse_end = time.monotonic() + reverse_time
+        while time.monotonic() < reverse_end:
+            self.client.send_wheels(-rev_wheel_speed, -rev_wheel_speed)
+            time.sleep(0.05)
+        
         # Stop briefly after backing up
         self.client.send_wheels(0.0, 0.0)
         time.sleep(0.1)

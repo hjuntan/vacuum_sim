@@ -151,6 +151,73 @@ class Planner:
         row = round(self.height - 1 - ((y - self.origin[1]) / self.resolution))
         return row, col
 
+    def optimize_path(self, start_pose, path, spacing=0.5):
+        """Prune redundant waypoints using line-of-sight for sharp turns, 
+        then resample straight segments so waypoints are spaced by `spacing` (e.g., 50cm)."""
+        if not path:
+            return []
+
+        # Step 1: Greedy line-of-sight pruning to keep sharp inflection/turning points
+        full_path = [(start_pose["x"], start_pose["y"])] + path
+        optimized = [full_path[0]]
+
+        i = 0
+        while i < len(full_path) - 1:
+            furthest_safe = i + 1
+            for j in range(len(full_path) - 1, i + 1, -1):
+                if self.is_line_safe_points(full_path[i], full_path[j]):
+                    furthest_safe = j
+                    break
+            optimized.append(full_path[furthest_safe])
+            i = furthest_safe
+
+        # Step 2: Resample the corner-to-corner path at fixed 50cm intervals
+        resampled = []
+        if len(optimized) > 0:
+            resampled.append(optimized[0])
+
+        for k in range(len(optimized) - 1):
+            p1 = optimized[k]
+            p2 = optimized[k + 1]
+
+            dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            if dist == 0:
+                continue
+
+            # Calculate how many 50cm steps fit into this segment
+            num_steps = max(1, math.ceil(dist / spacing))
+
+            for step in range(1, num_steps + 1):
+                t = step / num_steps
+                x = p1[0] + t * (p2[0] - p1[0])
+                y = p1[1] + t * (p2[1] - p1[1])
+                
+                # Avoid duplicate points near the end of segments
+                if not resampled or math.hypot(x - resampled[-1][0], y - resampled[-1][1]) > 0.05:
+                    resampled.append((x, y))
+
+        # Return resampled path excluding the starting position
+        return resampled[1:] if resampled else []
+
+    def is_line_safe_points(self, p1, p2, step_size=0.05):
+        """Helper to check if a straight line between two world coordinates is obstacle-free."""
+        r1, c1 = self.world_to_map(p1[0], p1[1])
+        r2, c2 = self.world_to_map(p2[0], p2[1])
+
+        distance = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        num_steps = max(1, int(distance / step_size))
+
+        for i in range(num_steps + 1):
+            t = i / num_steps
+            r = int(r1 + t * (r2 - r1))
+            c = int(c1 + t * (c2 - c1))
+            
+            if not (0 <= r < self.height and 0 <= c < self.width):
+                return False
+            if self.grid[r, c] > 127:  # Obstacle detected
+                return False
+        return True
+
     def visualize(self, robot_pose=None, path=None):
         """Render the live occupancy grid map and robot position using OpenCV."""
         import cv2
