@@ -138,6 +138,8 @@ class Controller:
             if path[-1] not in waypoints:
                 waypoints.append(path[-1])
 
+            # waypoints = path[::5]
+
             navigation_success = self.navigate_waypoints(current_pose, goal_idx, goal_name, waypoints, goal_pose)
             
             if navigation_success:
@@ -153,10 +155,81 @@ class Controller:
     def navigate_waypoints(self, current_pose, goal_idx, goal_name, waypoints, goal_pose):
         """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
 
-        track_width = self.robot_info["radius"] * 2.0               # Robot width matching simulator specs
-        wheel_radius = self.robot_info["wheel_radius"]              # Standard simulator wheel radius
-        max_linear_speed = self.robot_info["max_linear_speed"]      # Max forward speed (m/s)
-        max_angular_speed = self.robot_info["max_angular_speed"]    # Max turning speed (rad/s)
+        # Parameters for smooth driving
+        waypoint_tolerance = 0.25  # Distance threshold to consider a waypoint reached
+        lookahead_distance = 0.40  # Look ahead along the path for smooth curve-cutting
+        max_linear_speed = self.robot_info["max_linear_speed"]
+        wheel_radius = self.robot_info["wheel_radius"]
+        wheel_base = self.robot_info["wheel_base"]
+
+        current_wp_idx = 0
+        while current_wp_idx < len(waypoints):
+            robot_state = self.client.latest_state()
+            pose = robot_state["pose"]
+            x, y, current_yaw = pose["x"], pose["y"], pose["yaw"]
+
+            # Live visualization
+            self.planner.visualize(robot_pose=pose, path=waypoints, current_goal=goal_pose, start_pose=current_pose)
+
+            # Check for bumper collisions during navigation
+            if robot_state.get("bumper", False):
+                print("💥 Bumper collision detected during smooth wheel navigation!")
+                self.planner.mark_obstacle_from_bumper(pose)
+                self.execute_recovery()
+                return False
+
+            # Find the furthest waypoint within lookahead distance for smooth path tracking
+            target_pt = waypoints[current_wp_idx]
+            for idx in range(len(waypoints) - 1, current_wp_idx - 1, -1):
+                dist_to_wp = math.hypot(waypoints[idx][0] - x, waypoints[idx][1] - y)
+                if dist_to_wp <= lookahead_distance or idx == current_wp_idx:
+                    target_pt = waypoints[idx]
+                    current_wp_idx = idx  # Skip passed waypoints smoothly
+                    break
+
+            # If we are close enough to the current target point, advance index
+            dist_to_target = math.hypot(target_pt[0] - x, target_pt[1] - y)
+            if dist_to_target < waypoint_tolerance and current_wp_idx < len(waypoints) - 1:
+                current_wp_idx += 1
+                target_pt = waypoints[current_wp_idx]
+
+            # Compute heading error to target point
+            angle_to_target = math.atan2(target_pt[1] - y, target_pt[0] - x)
+            heading_error = self.normalize_angle(angle_to_target - current_yaw)
+
+            # Proportional steering control with damping to prevent oscillation
+            # If heading error is large, slow down and turn; if small, drive straight and smooth
+            k_p = 1.8
+            angular_velocity = k_p * heading_error
+            
+            # Reduce linear speed on sharp turns for stability, full speed on straight paths
+            linear_speed = max(0.05, max_linear_speed * (1.0 - min(1.0, abs(heading_error))))
+            
+            if current_wp_idx == len(waypoints) - 1 and dist_to_target < 0.15:
+                # Slow down smoothly as we approach the final waypoint
+                linear_speed = min(linear_speed, 0.10)
+
+            # Convert to differential wheel velocities
+            v_l = (linear_speed - (angular_velocity * wheel_base / 2.0)) / wheel_radius
+            v_r = (linear_speed + (angular_velocity * wheel_base / 2.0)) / wheel_radius
+
+            self.client.send_wheels(v_l, v_r)
+
+            # Check if final destination reached
+            final_dist = math.hypot(goal_pose[0] - x, goal_pose[1] - y)
+            if final_dist < 0.05 and current_wp_idx >= len(waypoints) - 1:
+                self.client.send_wheels(0.0, 0.0)
+                print(f"Successfully reached goal '{goal_name}'!")
+                
+                # Align to final goal orientation if specified
+                if len(goal_pose) > 2 and goal_pose[2] is not None:
+                    self.rotate_to(goal_pose)
+                return True
+
+            time.sleep(0.02)
+
+        self.client.send_wheels(0.0, 0.0)
+        return True
 
         for idx, (wx, wy) in enumerate(waypoints):
             print(f"Waypoint {idx + 1}/{len(waypoints)}: heading to ({wx:.2f}, {wy:.2f})")

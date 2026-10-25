@@ -3,10 +3,10 @@
 import heapq
 import math
 import numpy as np
+import scipy.ndimage as ndimage
 
 from io import BytesIO
 from PIL import Image
-from scipy.ndimage import binary_dilation
 
 class Planner:
     def __init__(self, map_info, png, robot_diameter=0.34, leeway=0.025):
@@ -16,29 +16,36 @@ class Planner:
         # 0 = free, 255 = occupied
         self.origin = map_info["origin"]
         
-        grid = np.array(Image.open(BytesIO(png)))
+        # Load raw map grid
+        self.raw_grid = np.array(Image.open(BytesIO(png)))
         self.width, self.height = map_info["width"], map_info["height"]
+        self.robot_diameter = robot_diameter
+        self.leeway = leeway
 
-        robot_radius = robot_diameter / 2.0
-        self.radius = robot_radius + leeway
+        # Compute standard fixed C-space grid and distance transform for centerline routing
+        self.recompute_grid()
 
-        # Create a circular structuring element (footprint mask) for C-Space dilation
-        radius_px = math.ceil(self.radius / self.resolution)
-        self.radius_px = radius_px
-        y, x = np.ogrid[-radius_px:radius_px+1, -radius_px:radius_px+1]
-        structuring_element = x**2 + y**2 <= (radius_px)**2
+    def recompute_grid(self):
+        """Compute fixed obstacle inflation and distance transform for centerline potential fields."""
+        robot_radius = self.robot_diameter / 2.0  # 0.17m robot radius
+        self.radius = robot_radius + self.leeway
+        self.radius_px = math.ceil(self.radius / self.resolution)
+        
+        obstacles = self.raw_grid > 127
+        
+        # Distance transform: distance in pixels from every free cell to nearest obstacle
+        self.dist_to_obstacle_px = ndimage.distance_transform_edt(~obstacles)
+        self.dist_to_obstacle_m = self.dist_to_obstacle_px * self.resolution
 
-        # PRECOMPUTE: Dilate obstacles once using C-optimized SciPy binary dilation.
-        # This permanently expands walls outward by the robot's full safety footprint.
-        obstacles = grid > 127
-        inflated_obstacles = binary_dilation(obstacles, structure=structuring_element)
+        # Fixed obstacle inflation mask
+        inflated_obstacles = self.dist_to_obstacle_px <= self.radius_px
 
-        self.base_grid = np.zeros_like(grid)
+        self.base_grid = np.zeros_like(self.raw_grid)
         self.base_grid[inflated_obstacles] = 255
         self.grid = self.base_grid.copy()
 
     def plan(self, start, goal):
-        """Plan a path from start to goal using A*."""
+        """Plan a path from start to goal using Clearance-Aware A* (Centerline Routing)."""
         start_row, start_col = self.world_to_map(start["x"], start["y"])
         goal_row, goal_col = self.world_to_map(goal[0], goal[1])
 
@@ -81,8 +88,22 @@ class Planner:
                 if not self.is_safe_to_occupy(neighbor_row, neighbor_col):
                     continue  # Skip occupied neighbors
 
-                move_cost = math.hypot(dr, dc)
-                tentative_g = g_score[(current_row, current_col)] + move_cost # g(n)
+                base_move_cost = math.hypot(dr, dc)
+                
+                # Centerline potential field: Pulls path toward the middle of openings
+                dist_wall = self.dist_to_obstacle_m[neighbor_row, neighbor_col]
+
+                wall_proximity_threshold = 0.30  # metres (nodes closer than this get a cost floor)
+                min_cost_threshold = 0.40 # minimum penalty threshold for being near walls
+                
+                if dist_wall < wall_proximity_threshold:
+                    # Enforce a high cost threshold when close to walls
+                    clearance_penalty = max(min_cost_threshold, 0.50 / (dist_wall + 0.02))
+                else:
+                    # Gentle centerline pull in open areas
+                    clearance_penalty = 0.05 / (dist_wall + 0.10)
+
+                tentative_g = g_score[(current_row, current_col)] + base_move_cost + clearance_penalty
 
                 if tentative_g < g_score.get((neighbor_row, neighbor_col), float("inf")):
                     came_from[(neighbor_row, neighbor_col)] = (current_row, current_col)
@@ -92,7 +113,7 @@ class Planner:
                     f_score = tentative_g + heuristic((neighbor_row, neighbor_col), (goal_row, goal_col))
                     heapq.heappush(open_set, (f_score, neighbor_row, neighbor_col))
 
-        return []  # No path found
+        return []
 
     def is_safe_to_occupy(self, row, col):
         """Check if the robot can safely occupy the cell at (row, col) considering its footprint."""
@@ -187,9 +208,10 @@ class Planner:
                     nr, nc = r + dr, c + dc
                     if 0 <= nr < self.height and 0 <= nc < self.width:
                         if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius:
+                            self.base_grid[nr, nc] = 255
                             self.grid[nr, nc] = 255
                             
-        print(f"🛑 Bumper hit! Precisely marked obstacle at world coords ({obs_x:.2f}, {obs_y:.2f})")
+        print(f"🛑 Bumper hit! Permanently marked perimeter obstacle at ({obs_x:.2f}, {obs_y:.2f})")
     
     def map_to_world(self, row, col):
         """Convert map coordinates (pixels) to world coordinates (m)."""
@@ -203,26 +225,47 @@ class Planner:
         row = round(self.height - 1 - ((y - self.origin[1]) / self.resolution))
         return row, col
 
-    def optimize_path(self, start_pose, path, spacing=0.5):
-        """Prune redundant waypoints using greedy line-of-sight string-pulling (minimal waypoints, sharp turns)."""
+    def optimize_path(self, start_pose, path, max_segment_length=0.15):
+        """
+        Prunes redundant A* waypoints using line-of-sight checks, then densifies 
+        the path with closely spaced interpolated points to ensure smooth execution 
+        while strictly maintaining the path's shape.
+        """
         if not path:
             return []
 
-        # Step 1: Greedy line-of-sight pruning to keep sharp inflection/turning points
         full_path = [(start_pose["x"], start_pose["y"])] + path
         optimized = [full_path[0]]
 
+        # 1. Greedy line-of-sight pruning
         i = 0
         while i < len(full_path) - 1:
             furthest_safe = i + 1
-            for j in range(len(full_path) - 1, i + 1, -1):
+            max_lookahead = min(len(full_path), i + 15)
+            for j in range(max_lookahead - 1, i + 1, -1):
                 if self.is_line_safe_points(full_path[i], full_path[j]):
                     furthest_safe = j
                     break
             optimized.append(full_path[furthest_safe])
             i = furthest_safe
 
-        return optimized[1:]
+        # 2. Densify/Interpolate waypoints to create a smooth, continuous trajectory
+        smoothed_path = []
+        for idx in range(len(optimized) - 1):
+            p1 = np.array(optimized[idx])
+            p2 = np.array(optimized[idx+1])
+            dist = np.linalg.norm(p2 - p1)
+            
+            # Break long segments into fine-grained steps (e.g., every 15cm)
+            num_steps = max(1, int(dist / max_segment_length))
+            for step in range(num_steps):
+                t = step / num_steps
+                interp_pt = (1 - t) * p1 + t * p2
+                smoothed_path.append((interp_pt[0], interp_pt[1]))
+                
+        smoothed_path.append(optimized[-1])
+
+        return smoothed_path[1:]
 
     def is_line_safe_points(self, p1, p2, step_size=0.05):
         """Helper to check if a straight line between two world coordinates is obstacle-free."""
