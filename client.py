@@ -1,3 +1,4 @@
+""" Managing all ZMQ communications, command push and sensor streams"""
 import json
 import zmq
 

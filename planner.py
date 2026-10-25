@@ -18,15 +18,15 @@ class Planner:
         
         # Load raw map grid
         self.raw_grid = np.array(Image.open(BytesIO(png)))
-        self.visual_grid = self.raw_grid.copy()
+        self.visual_grid = self.raw_grid.copy() # To aid with the visualiser only
         self.width, self.height = map_info["width"], map_info["height"]
         self.robot_diameter = robot_diameter
         self.leeway = leeway
 
         # Compute standard fixed C-space grid and distance transform for centerline routing
-        self.recompute_grid()
+        self.compute_grid()
 
-    def recompute_grid(self):
+    def compute_grid(self):
         """Compute fixed obstacle inflation and distance transform for centerline potential fields."""
         robot_radius = self.robot_diameter / 2.0  # 0.17m robot radius
         self.radius = robot_radius + self.leeway
@@ -146,10 +146,6 @@ class Planner:
 
         yaw = robot_pose["yaw"]
         cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
-
-        # Exclude top rows (ceiling/sky) and bottom rows (floor plane)
-        v_min, v_max = int(h * 0.35), int(h * 0.75)
-        u_min, u_max = int(w * 0.2), int(w * 0.8)
 
         # Loop through pixels with a step of 4 for efficiency
         for v in range(0, h, 4):

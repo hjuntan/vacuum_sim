@@ -12,43 +12,6 @@ class Controller:
         turn_rate = 0.8
         self.turn_wheel_speed = turn_rate * robot_info["wheel_base"] / 2 / robot_info["wheel_radius"]
 
-    def run_nearest_neighbor_missions(self, goals):
-        """Continuously select and navigate to the closest remaining goal relative to current pose."""
-        remaining_goals = list(goals)
-        
-        while remaining_goals:
-            robot_state = self.client.latest_state()
-            current_pose = robot_state["pose"]
-            
-            closest_goal = None
-            min_distance = float('inf')
-            
-            for goal in remaining_goals:
-                goal_idx, goal_name, goal_pose = goal
-                gx, gy = goal_pose[0], goal_pose[1]
-                
-                dist = math.hypot(gx - current_pose["x"], gy - current_pose["y"])
-                if dist < min_distance:
-                    min_distance = dist
-                    closest_goal = goal
-            
-            if not closest_goal:
-                break
-                
-            goal_idx, goal_name, goal_pose = closest_goal
-            print(f"\n📍 Closest goal selected: '{goal_name}' (Distance: {min_distance:.2f}m)")
-            
-            success = self.execute_goal_mission(goal_idx, goal_name, goal_pose, current_pose=current_pose)
-            
-            if success:
-                print(f"✅ Completed goal '{goal_name}'. Removing from queue.")
-                remaining_goals.remove(closest_goal)
-            else:
-                print(f"⚠️ Mission to '{goal_name}' failed. Removing to prevent deadlock.")
-                remaining_goals.remove(closest_goal)
-
-        print("🎉 All goal missions successfully completed!")
-
     def execute_goal_mission(self, goal_idx, goal_name, goal_pose, current_pose):
         target_x, target_y = goal_pose[0], goal_pose[1]
 

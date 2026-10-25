@@ -3,12 +3,6 @@
 pip install pyzmq numpy pillow; python client.py [--host localhost]
 """
 import argparse
-import io
-import json
-import math
-import numpy as np
-import time
-import zmq
 
 from client import Client
 from controller import Controller

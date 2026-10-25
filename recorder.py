@@ -1,3 +1,5 @@
+""" Isolated background recorder thread capturing RGB/Depth Stream and synchonization metadata"""
+
 import os
 import json
 import time
@@ -6,7 +8,6 @@ import io
 import numpy as np
 from PIL import Image
 import cv2
-import zmq
 
 class Recorder:
     def __init__(self, client, output_dir="recordings"):
