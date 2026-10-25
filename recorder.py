@@ -114,7 +114,8 @@ class Recorder:
         if self.thread:
             self.thread.join(timeout=2.0)
         try:
-            self.camera_sub.close()
+            if self.client.camera_recorder:
+                self.client.camera_recorder.close()
         except Exception:
             pass
         print(f"🛑 Camera recording stopped. Total frames recorded: {self.frame_count}")

@@ -84,9 +84,6 @@ def main():
         recorder.stop()
         return
 
-    # Show all available goals visually
-    planner.visualize(all_goals=goals)
-
     # 🌟 Continuous goal selection loop by name
     try:
         while True:
@@ -96,6 +93,9 @@ def main():
                 print(f" - {g['name']}")
             print(" 'q' | Quit / Exit     ")
             print("="*30)
+
+            # Show all available goals visually
+            planner.visualize(all_goals=goals)
 
             goal_name_input = input(f"\nEnter the goal name (or 'q' to exit): ").strip()
             
