@@ -59,17 +59,17 @@ class Controller:
 
         direct_success = False
         if map_clear:
-            direct_success = self.navigate_direct_path(goal_idx, goal_name, goal_pose)
+            direct_success = self.navigate_direct_path(current_pose, goal_idx, goal_name, goal_pose)
 
         if direct_success:
             return True  # Indicate that the goal was successfully processed via direct navigation
         
         # A* fallback if direct navigation fails or is not clear
         print(f"Using A* waypoints...")
-        return self.navigate_A_star_path(goal_idx, goal_name, goal_pose)
+        return self.navigate_A_star_path(current_pose, goal_idx, goal_name, goal_pose)
 
 
-    def navigate_direct_path(self, goal_idx, goal_name, goal_pose):
+    def navigate_direct_path(self, current_pose, goal_idx, goal_name, goal_pose):
         target_x, target_y = goal_pose[0], goal_pose[1]
         target_yaw = goal_pose[2] if len(goal_pose) > 2 else None
 
@@ -95,7 +95,7 @@ class Controller:
             status = goto_info["status"]
             pose = robot_state["pose"]
 
-            self.planner.visualize(robot_pose=pose, current_goal=goal_pose)
+            self.planner.visualize(robot_pose=pose, current_goal=goal_pose, is_direct_path=True, start_pose=current_pose)
 
             print(f"🔄 Direct path | Pose: x={pose['x']:.2f}, y={pose['y']:.2f}, yaw={pose['yaw']:.2f} | Status: {status}", end="\r")
 
@@ -108,7 +108,7 @@ class Controller:
                     print(f"\n💥 Robot bumped an obstacle! Marking and recovering...")
                     # Precisely mark the obstacle using the robot pose at the moment of impact
                     self.planner.mark_obstacle_from_bumper(pose)
-                    self.execute_recovery()
+                    self.execute_recovery(goal_pose)
                     print("Recovery rotation complete. Switching to A* planner...")
                     break
             time.sleep(0.02)
@@ -119,7 +119,7 @@ class Controller:
         
         return direct_success
 
-    def navigate_A_star_path(self, goal_idx, goal_name, goal_pose):
+    def navigate_A_star_path(self, current_pose, goal_idx, goal_name, goal_pose):
         max_attempts = 20
         for attempt in range(max_attempts):
             # self.update_map_from_camera()
@@ -138,7 +138,7 @@ class Controller:
             if path[-1] not in waypoints:
                 waypoints.append(path[-1])
 
-            navigation_success = self.navigate_waypoints(goal_idx, goal_name, waypoints, goal_pose)
+            navigation_success = self.navigate_waypoints(current_pose, goal_idx, goal_name, waypoints, goal_pose)
             
             if navigation_success:
                 self.mark_goal(goal_name)
@@ -150,7 +150,7 @@ class Controller:
         print(f"❌ Failed to reach goal '{goal_name}' after {max_attempts} attempts.")
         return False
 
-    def navigate_waypoints(self, goal_idx, goal_name, waypoints, goal_pose):
+    def navigate_waypoints(self, current_pose, goal_idx, goal_name, waypoints, goal_pose):
         """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
 
         track_width = self.robot_info["radius"] * 2.0               # Robot width matching simulator specs
@@ -170,7 +170,7 @@ class Controller:
                 if robot_state["bumper"]:
                     print(f"\n💥 Bumper collision detected during smooth wheel navigation!")
                     self.planner.mark_obstacle_from_bumper(pose)
-                    self.execute_recovery()
+                    self.execute_recovery(goal_pose)
                     return False
 
                 # Dynamically update map from camera observations on the fly
@@ -210,7 +210,7 @@ class Controller:
                 self.client.send_wheels(v_l, v_r)
                 
                 # Live visualization
-                self.planner.visualize(robot_pose=pose, path=waypoints, current_goal=goal_pose)
+                self.planner.visualize(robot_pose=pose, path=waypoints, current_goal=goal_pose, start_pose=current_pose)
                 time.sleep(0.05)
 
         # Stop robot after completing final waypoint
@@ -219,7 +219,7 @@ class Controller:
 
         # Align to target yaw orientation if specified in goal_pose
         if goal_pose and len(goal_pose) > 2 and goal_pose[2] is not None:
-            self.rotate_to(goal_pose[2])
+            self.rotate_to(goal_pose)
         
         return True
 
@@ -236,7 +236,7 @@ class Controller:
         except Exception as e:
             print(f"⚠️ Failed to update map from camera: {e}")
 
-    def execute_recovery(self):
+    def execute_recovery(self, goal_pose=None):
         """Rotate in place to clear the bumper sensor."""
         wheel_radius = self.robot_info["wheel_radius"]
         wheel_base = self.robot_info["wheel_base"]
@@ -249,6 +249,9 @@ class Controller:
         reverse_end = time.monotonic() + reverse_time
         while time.monotonic() < reverse_end:
             self.client.send_wheels(-rev_wheel_speed, -rev_wheel_speed)
+            robot_state = self.client.latest_state()
+            pose = robot_state["pose"]
+            self.planner.visualize(robot_pose=pose, current_goal=goal_pose)
             time.sleep(0.05)
         
         # Stop briefly after backing up
@@ -258,13 +261,17 @@ class Controller:
     def normalize_angle(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    def rotate_to(self, target_yaw, tolerance=0.01, timeout=5.0):
+    def rotate_to(self, goal_pose, tolerance=0.01, timeout=5.0):
         """Rotate the robot to a specific yaw angle (in radians) with a given tolerance."""
+        target_yaw = goal_pose[2]
         start_time = time.monotonic()
         while time.monotonic() - start_time < timeout:
             robot_state = self.client.latest_state()
-            current_yaw = robot_state["pose"]["yaw"]
+            pose = robot_state["pose"]
+            current_yaw = pose["yaw"]
             angle_diff = self.normalize_angle(target_yaw - current_yaw)
+
+            self.planner.visualize(robot_pose=pose, current_goal=goal_pose)
 
             if abs(angle_diff) <= tolerance:
                 self.client.send_wheels(0.0, 0.0)

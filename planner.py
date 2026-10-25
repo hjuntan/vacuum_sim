@@ -243,7 +243,7 @@ class Planner:
                 return False
         return True
 
-    def visualize(self, robot_pose=None, path=None, current_goal=None, trajectory=None):
+    def visualize(self, robot_pose=None, path=None, current_goal=None, trajectory=None, is_direct_path=False, start_pose=None):
         """Render the live occupancy grid map and robot position using OpenCV."""
         import cv2
         # Copy grid and convert to BGR color for overlays
@@ -251,11 +251,22 @@ class Planner:
         img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
         # Draw A* path if available (Blue line)
-        if path and len(path) > 1:
-            for i in range(len(path) - 1):
-                r1, c1 = self.world_to_map(path[i][0], path[i][1])
-                r2, c2 = self.world_to_map(path[i+1][0], path[i+1][1])
-                cv2.line(img_bgr, (c1, r1), (c2, r2), (255, 0, 0), 2)
+        if is_direct_path:
+            if start_pose:
+                sr, sc = self.world_to_map(start_pose["x"], start_pose["y"])
+                gx, gy = current_goal[0], current_goal[1]
+                gr, gc = self.world_to_map(gx, gy)
+                cv2.line(img_bgr, (sc, sr), (gc, gr), (255, 0, 0), 2)
+        else:
+            if path and len(path) > 1:
+                if start_pose:
+                    sr, sc = self.world_to_map(start_pose["x"], start_pose["y"])
+                    r1, c1 = self.world_to_map(path[0][0], path[0][1])
+                    cv2.line(img_bgr, (sc, sr), (c1, r1), (255, 0, 0), 2)
+                for i in range(len(path) - 1):
+                    r1, c1 = self.world_to_map(path[i][0], path[i][1])
+                    r2, c2 = self.world_to_map(path[i+1][0], path[i+1][1])
+                    cv2.line(img_bgr, (c1, r1), (c2, r2), (255, 0, 0), 2)
 
         if current_goal:
             gx, gy = current_goal[0], current_goal[1]
