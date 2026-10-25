@@ -14,6 +14,7 @@ from client import Client
 from controller import Controller
 from PIL import Image
 from planner import Planner
+from recorder import Recorder
 
 def main():
     ap = argparse.ArgumentParser()
@@ -74,6 +75,10 @@ def main():
     planner = Planner(map_info, png)
     controller = Controller(client, planner, robot_info, camera_info)
 
+    # Initialize and start camera recorder (Task 2)
+    recorder = Recorder(client)
+    recorder.start()
+
     # Get available goals
     goals = scene["goals"]
     if not goals:
@@ -87,6 +92,8 @@ def main():
     formatted_goals = [(idx, target["name"], target["pose"]) for idx, target in enumerate(goals)]
 
     controller.run_nearest_neighbor_missions(formatted_goals)
+
+    recorder.stop()
 
     print("\n####################")
     print("All goals processed!")
