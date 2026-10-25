@@ -18,6 +18,7 @@ class Planner:
         
         # Load raw map grid
         self.raw_grid = np.array(Image.open(BytesIO(png)))
+        self.visual_grid = self.raw_grid.copy()
         self.width, self.height = map_info["width"], map_info["height"]
         self.robot_diameter = robot_diameter
         self.leeway = leeway
@@ -40,9 +41,8 @@ class Planner:
         # Fixed obstacle inflation mask
         inflated_obstacles = self.dist_to_obstacle_px <= self.radius_px
 
-        self.base_grid = np.zeros_like(self.raw_grid)
-        self.base_grid[inflated_obstacles] = 255
-        self.grid = self.base_grid.copy()
+        self.grid = np.zeros_like(self.raw_grid)
+        self.grid[inflated_obstacles] = 255
 
     def plan(self, start, goal):
         """Plan a path from start to goal using Clearance-Aware A* (Centerline Routing)."""
@@ -178,7 +178,7 @@ class Planner:
                         for dc in range(-obstacle_radius_px, obstacle_radius_px + 1):
                             nr, nc = r + dr, c + dc
                             if 0 <= nr < self.height and 0 <= nc < self.width:
-                                self.base_grid[nr, nc] = 255
+                                self.visual_grid[nr, nc] = 255
                                 self.grid[nr, nc] = 255
 
     def mark_obstacle_from_bumper(self, robot_pose):
@@ -199,7 +199,7 @@ class Planner:
                 for dc in range(-obstacle_radius_px, obstacle_radius_px + 1):
                     nr, nc = r + dr, c + dc
                     if 0 <= nr < self.height and 0 <= nc < self.width:
-                        self.base_grid[nr, nc] = 255
+                        self.visual_grid[nr, nc] = 255
                         self.grid[nr, nc] = 255
                             
         print(f"🛑 Bumper hit! Permanently marked perimeter obstacle at ({obs_x:.2f}, {obs_y:.2f})")
@@ -281,7 +281,7 @@ class Planner:
         """Render the live occupancy grid map and robot position using OpenCV."""
         import cv2
         # Copy grid and convert to BGR color for overlays
-        img = self.grid.copy().astype(np.uint8)
+        img = self.visual_grid.copy().astype(np.uint8)
         img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
         # Draw A* path if available (Blue line)
