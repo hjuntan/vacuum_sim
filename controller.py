@@ -95,7 +95,7 @@ class Controller:
             status = goto_info["status"]
             pose = robot_state["pose"]
 
-            self.planner.visualize(robot_pose=pose)
+            self.planner.visualize(robot_pose=pose, current_goal=goal_pose)
 
             print(f"🔄 Direct path | Pose: x={pose['x']:.2f}, y={pose['y']:.2f}, yaw={pose['yaw']:.2f} | Status: {status}", end="\r")
 
@@ -210,7 +210,7 @@ class Controller:
                 self.client.send_wheels(v_l, v_r)
                 
                 # Live visualization
-                self.planner.visualize(robot_pose=pose, path=waypoints)
+                self.planner.visualize(robot_pose=pose, path=waypoints, current_goal=goal_pose)
                 time.sleep(0.05)
 
         # Stop robot after completing final waypoint

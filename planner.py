@@ -243,7 +243,7 @@ class Planner:
                 return False
         return True
 
-    def visualize(self, robot_pose=None, path=None):
+    def visualize(self, robot_pose=None, path=None, current_goal=None, trajectory=None):
         """Render the live occupancy grid map and robot position using OpenCV."""
         import cv2
         # Copy grid and convert to BGR color for overlays
@@ -257,11 +257,31 @@ class Planner:
                 r2, c2 = self.world_to_map(path[i+1][0], path[i+1][1])
                 cv2.line(img_bgr, (c1, r1), (c2, r2), (255, 0, 0), 2)
 
+        if current_goal:
+            gx, gy = current_goal[0], current_goal[1]
+            gr, gc = self.world_to_map(gx, gy)
+            cv2.circle(img_bgr, (gc, gr), 8, (0, 255, 255), 2)
+            cv2.circle(img_bgr, (gc, gr), 3, (0, 255, 255), -1)
+            if len(current_goal) > 2:
+                yaw = current_goal[2] if len(current_goal) > 2 else None
+                hx = gx + 0.15 * math.cos(yaw)
+                hy = gy + 0.15 * math.sin(yaw)
+                hr, hc = self.world_to_map(hx, hy)
+                cv2.line(img_bgr, (gc, gr), (hc, hr), (255, 255, 255), 2)
+                
+
         # Draw robot position if available (Red filled circle)
         if robot_pose:
             rr, cc = self.world_to_map(robot_pose["x"], robot_pose["y"])
             radius_px = max(int(self.radius / self.resolution), 3)
             cv2.circle(img_bgr, (cc, rr), radius_px, (0, 0, 255), -1)
+
+            # Heading direction pointer line
+            yaw = robot_pose["yaw"]
+            hx = robot_pose["x"] + 0.15 * math.cos(yaw)
+            hy = robot_pose["y"] + 0.15 * math.sin(yaw)
+            hr, hc = self.world_to_map(hx, hy)
+            cv2.line(img_bgr, (cc, rr), (hc, hr), (255, 255, 255), 2)
 
         # Display window
         cv2.imshow("Live Occupancy Grid Map", img_bgr)
