@@ -37,7 +37,7 @@ if not goals:
     print("Error: No goals found in scene.")
     exit(1)
 
-target_goal = goals[2]
+target_goal = goals[1]
 goal_pose = target_goal["pose"]
 print(f"Testing path to Goal '{target_goal['name']}' at pose: {goal_pose}")
 

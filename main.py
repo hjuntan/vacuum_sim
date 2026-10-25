@@ -72,8 +72,8 @@ def main():
     camera_info, _ = client.call("get_camera_info")
 
     # Initialize the controller and planner
-    controller = Controller(client, robot_info, camera_info)
     planner = Planner(map_info, png)
+    controller = Controller(client, planner, robot_info, camera_info)
 
     # Get available goals
     goals = scene["goals"]
@@ -101,7 +101,7 @@ def main():
         robot_state = client.latest_state()
         current_pose = robot_state["pose"]
         
-        controller.execute_goal_mission(idx, goal_name, goal_pose, planner, current_pose=current_pose)
+        controller.execute_goal_mission(idx, goal_name, goal_pose, current_pose=current_pose)
 
     print("\n####################")
     print("All goals processed!")

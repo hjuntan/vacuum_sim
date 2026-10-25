@@ -24,6 +24,7 @@ class Planner:
 
         # Create a circular structuring element (footprint mask) for C-Space dilation
         radius_px = math.ceil(self.radius / self.resolution)
+        self.radius_px = radius_px
         y, x = np.ogrid[-radius_px:radius_px+1, -radius_px:radius_px+1]
         structuring_element = x**2 + y**2 <= (radius_px)**2
 
@@ -32,42 +33,9 @@ class Planner:
         obstacles = grid > 127
         inflated_obstacles = binary_dilation(obstacles, structure=structuring_element)
 
-        self.grid = np.zeros_like(grid)
-        self.grid[inflated_obstacles] = 255
-
-    def is_safe_to_occupy(self, row, col):
-        """Check if the robot can safely occupy the cell at (row, col) considering its footprint."""
-        if not (0 <= row < self.height and 0 <= col < self.width):
-            return False
-        return self.grid[row, col] <= 127
-
-    def is_line_safe(self, start_pose, goal_pose, step_size=0.05):
-        """Check if the straight line from start_pose to goal_pose is free of obstacles."""
-        start_row, start_col = self.world_to_map(start_pose["x"], start_pose["y"])
-        goal_row, goal_col = self.world_to_map(goal_pose[0], goal_pose[1])
-
-        distance = math.hypot(goal_pose[0] - start_pose["x"], goal_pose[1] - start_pose["y"])
-        num_steps = max(1, int(distance / step_size))
-
-        for i in range(num_steps + 1):
-            t = i / num_steps
-            r = int(start_row + t * (goal_row - start_row))
-            c = int(start_col + t * (goal_col - start_col))
-            if not self.is_safe_to_occupy(r, c):
-                return False
-        return True
-
-    def map_to_world(self, row, col):
-        """Convert map coordinates (pixels) to world coordinates (m)."""
-        x = self.origin[0] + (col + 0.5) * self.resolution
-        y = self.origin[1] + (self.height - 1 - row + 0.5) * self.resolution
-        return x, y
-
-    def world_to_map(self, x, y):
-        """Convert world coordinates (m) to map coordinates (pixels)."""
-        col = int((x - self.origin[0]) / self.resolution - 0.5)
-        row = int(self.height - 1 - ((y - self.origin[1]) / self.resolution - 0.5))
-        return row, col
+        self.base_grid = np.zeros_like(grid)
+        self.base_grid[inflated_obstacles] = 255
+        self.grid = self.base_grid.copy()
 
     def plan(self, start, goal):
         """Plan a path from start to goal using A*."""
@@ -125,3 +93,84 @@ class Planner:
                     heapq.heappush(open_set, (f_score, neighbor_row, neighbor_col))
 
         return []  # No path found
+
+    def is_safe_to_occupy(self, row, col):
+        """Check if the robot can safely occupy the cell at (row, col) considering its footprint."""
+        if not (0 <= row < self.height and 0 <= col < self.width):
+            return False
+        return self.grid[row, col] <= 127
+
+    def is_line_safe(self, start_pose, goal_pose, step_size=0.05):
+        """Check if the straight line from start_pose to goal_pose is free of obstacles."""
+        start_row, start_col = self.world_to_map(start_pose["x"], start_pose["y"])
+        goal_row, goal_col = self.world_to_map(goal_pose[0], goal_pose[1])
+
+        distance = math.hypot(goal_pose[0] - start_pose["x"], goal_pose[1] - start_pose["y"])
+        num_steps = max(1, int(distance / step_size))
+
+        for i in range(num_steps + 1):
+            t = i / num_steps
+            r = int(start_row + t * (goal_row - start_row))
+            c = int(start_col + t * (goal_col - start_col))
+            if not self.is_safe_to_occupy(r, c):
+                return False
+        return True
+
+    def mark_obstacle_from_bumper(self, robot_pose):
+        """Precisely mark an obstacle at the robot's perimeter when a bumper collision occurs."""
+        x, y, yaw = robot_pose["x"], robot_pose["y"], robot_pose["yaw"]
+        
+        # Robot radius is 0.17m (0.34m diameter / 2)
+        robot_radius = 0.17
+        
+        # The contact point is exactly at the robot's outer edge along its current yaw heading
+        obs_x = x + robot_radius * math.cos(yaw)
+        obs_y = y + robot_radius * math.sin(yaw)
+        
+        r, c = self.world_to_map(obs_x, obs_y)
+        if 0 <= r < self.height and 0 <= c < self.width: # note: self.width
+            # Inflate with robot radius footprint so future paths steer clear of it
+            for dr in range(-self.radius_px, self.radius_px + 1):
+                for dc in range(-self.radius_px, self.radius_px + 1):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < self.height and 0 <= nc < self.width:
+                        if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius:
+                            self.grid[nr, nc] = 255
+                            
+        print(f"🛑 Bumper hit! Precisely marked obstacle at world coords ({obs_x:.2f}, {obs_y:.2f})")
+    
+    def map_to_world(self, row, col):
+        """Convert map coordinates (pixels) to world coordinates (m)."""
+        x = self.origin[0] + (col + 0.5) * self.resolution
+        y = self.origin[1] + (self.height - 1 - row + 0.5) * self.resolution
+        return x, y
+
+    def world_to_map(self, x, y):
+        """Convert world coordinates (m) to map coordinates (pixels)."""
+        col = round((x - self.origin[0]) / self.resolution)
+        row = round(self.height - 1 - ((y - self.origin[1]) / self.resolution))
+        return row, col
+
+    def visualize(self, robot_pose=None, path=None):
+        """Render the live occupancy grid map and robot position using OpenCV."""
+        import cv2
+        # Copy grid and convert to BGR color for overlays
+        img = self.grid.copy().astype(np.uint8)
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        # Draw A* path if available (Blue line)
+        if path and len(path) > 1:
+            for i in range(len(path) - 1):
+                r1, c1 = self.world_to_map(path[i][0], path[i][1])
+                r2, c2 = self.world_to_map(path[i+1][0], path[i+1][1])
+                cv2.line(img_bgr, (c1, r1), (c2, r2), (255, 0, 0), 2)
+
+        # Draw robot position if available (Red filled circle)
+        if robot_pose:
+            rr, cc = self.world_to_map(robot_pose["x"], robot_pose["y"])
+            radius_px = max(int(self.radius / self.resolution), 3)
+            cv2.circle(img_bgr, (cc, rr), radius_px, (0, 0, 255), -1)
+
+        # Display window
+        cv2.imshow("Live Occupancy Grid Map", img_bgr)
+        cv2.waitKey(1)
