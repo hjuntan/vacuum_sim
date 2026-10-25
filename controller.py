@@ -12,18 +12,47 @@ class Controller:
         turn_rate = 0.8
         self.turn_wheel_speed = turn_rate * robot_info["wheel_base"] / 2 / robot_info["wheel_radius"]
 
-    def execute_goal_mission(self, goal_idx, goal_name, goal_pose, current_pose=None):
+    def run_nearest_neighbor_missions(self, goals):
+        """Continuously select and navigate to the closest remaining goal relative to current pose."""
+        remaining_goals = list(goals)
+        
+        while remaining_goals:
+            robot_state = self.client.latest_state()
+            current_pose = robot_state["pose"]
+            
+            closest_goal = None
+            min_distance = float('inf')
+            
+            for goal in remaining_goals:
+                goal_idx, goal_name, goal_pose = goal
+                gx, gy = goal_pose[0], goal_pose[1]
+                
+                dist = math.hypot(gx - current_pose["x"], gy - current_pose["y"])
+                if dist < min_distance:
+                    min_distance = dist
+                    closest_goal = goal
+            
+            if not closest_goal:
+                break
+                
+            goal_idx, goal_name, goal_pose = closest_goal
+            print(f"\n📍 Closest goal selected: '{goal_name}' (Distance: {min_distance:.2f}m)")
+            
+            success = self.execute_goal_mission(goal_idx, goal_name, goal_pose, current_pose=current_pose)
+            
+            if success:
+                print(f"✅ Completed goal '{goal_name}'. Removing from queue.")
+                remaining_goals.remove(closest_goal)
+            else:
+                print(f"⚠️ Mission to '{goal_name}' failed. Removing to prevent deadlock.")
+                remaining_goals.remove(closest_goal)
+
+        print("🎉 All goal missions successfully completed!")
+
+    def execute_goal_mission(self, goal_idx, goal_name, goal_pose, current_pose):
         target_x, target_y = goal_pose[0], goal_pose[1]
 
         print(f"Planning path to goal '{goal_name}' at x={target_x}, y={target_y}")
-
-        # Orient the robot to face the goal before performing the camera check
-        target_yaw = math.atan2(target_y - current_pose["y"], target_x - current_pose["x"])
-        print(f"Orienting robot to face goal at yaw {target_yaw:.2f}...")
-        self.rotate_to(target_yaw)
-        time.sleep(0.2)  # Brief pause to let camera stream settle
-
-        dist_to_goal = math.hypot(target_x - current_pose["x"], target_y - current_pose["y"]) if current_pose else None
 
         # Check if the direct path is clear using current map data
         map_clear = self.planner.is_line_safe(current_pose, goal_pose) if current_pose else False
@@ -37,8 +66,6 @@ class Controller:
         
         # A* fallback if direct navigation fails or is not clear
         print(f"Using A* waypoints...")
-
-
         return self.navigate_A_star_path(goal_idx, goal_name, goal_pose)
 
 
@@ -93,7 +120,7 @@ class Controller:
         return direct_success
 
     def navigate_A_star_path(self, goal_idx, goal_name, goal_pose):
-        max_attempts = 5
+        max_attempts = 20
         for attempt in range(max_attempts):
             # self.update_map_from_camera()
 
@@ -106,7 +133,7 @@ class Controller:
                 time.sleep(0.5)
                 continue
 
-            print(f"A* path found with {len(path)} waypoints. Navigating...")
+            print(f"A* path found with {len(path)} waypoints. Optimising...")
             waypoints = self.planner.optimize_path(current_pose, path)
             if path[-1] not in waypoints:
                 waypoints.append(path[-1])
@@ -123,12 +150,13 @@ class Controller:
         print(f"❌ Failed to reach goal '{goal_name}' after {max_attempts} attempts.")
         return False
 
-    """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
     def navigate_waypoints(self, goal_idx, goal_name, waypoints, goal_pose):
-        track_width = self.robot_info["radius"] * 2.0        # Robot width matching simulator specs
-        wheel_radius = self.robot_info["wheel_radius"]      # Standard simulator wheel radius
-        max_linear_speed = self.robot_info["max_linear_speed"]   # Max forward speed (m/s)
-        max_angular_speed = self.robot_info["max_angular_speed"]   # Max turning speed (rad/s)
+        """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
+
+        track_width = self.robot_info["radius"] * 2.0               # Robot width matching simulator specs
+        wheel_radius = self.robot_info["wheel_radius"]              # Standard simulator wheel radius
+        max_linear_speed = self.robot_info["max_linear_speed"]      # Max forward speed (m/s)
+        max_angular_speed = self.robot_info["max_angular_speed"]    # Max turning speed (rad/s)
 
         for idx, (wx, wy) in enumerate(waypoints):
             print(f"Waypoint {idx + 1}/{len(waypoints)}: heading to ({wx:.2f}, {wy:.2f})")
@@ -139,7 +167,7 @@ class Controller:
                 x, y, yaw = pose["x"], pose["y"], pose["yaw"]
 
                 # Check bumper collision during movement
-                if robot_state.get("bumped", False):
+                if robot_state["bumper"]:
                     print(f"\n💥 Bumper collision detected during smooth wheel navigation!")
                     self.planner.mark_obstacle_from_bumper(pose)
                     self.execute_recovery()
@@ -153,8 +181,8 @@ class Controller:
                 dy = wy - y
                 dist = math.hypot(dx, dy)
 
-                # Waypoint reached tolerance (15cm threshold)
-                if dist < 0.15:
+                # Waypoint reached tolerance (5cm threshold)
+                if dist < 0.05:
                     break
 
                 target_angle = math.atan2(dy, dx)
@@ -188,38 +216,12 @@ class Controller:
         # Stop robot after completing final waypoint
         self.client.send_wheels(0.0, 0.0)
         print(f"✅ Successfully navigated all waypoints for '{goal_name}' with smooth motion!")
+
+        # Align to target yaw orientation if specified in goal_pose
+        if goal_pose and len(goal_pose) > 2 and goal_pose[2] is not None:
+            self.rotate_to(goal_pose[2])
+        
         return True
-
-    def monitor_waypoint(self, goto_id, goal_name, wp_idx, num_waypoints):
-        """Monitor state stream until the waypoint is reached or bumped"""
-        has_reached_wp = False
-        while not has_reached_wp:
-            robot_state = self.client.latest_state()
-            goto_info = robot_state["goto"]
-            status = goto_info["status"]
-            pose = robot_state["pose"]
-
-            self.planner.visualize(robot_pose=pose)
-
-            print(f"🔄 Pose: x={pose['x']:.2f}, y={pose['y']:.2f}, yaw={pose['yaw']:.2f} | Goto status: {status}", end="\r")
-
-            if goto_info.get("id") != goto_id:
-                time.sleep(0.02)
-                continue  # Ignore other goto commands
-
-            if status == "reached":
-                print(f"\nReached waypoint {wp_idx + 1}/{num_waypoints} for '{goal_name}'.")
-                has_reached_wp = True
-            elif status == "bumped":
-                print(f"\n💥 Robot bumped an obstacle! Marking and recovering...")
-                # Precisely mark the obstacle using the robot pose at the moment of impact
-                self.planner.mark_obstacle_from_bumper(pose)
-                self.execute_recovery()
-                return False  # Indicate that the navigation failed due to a bump
-
-            time.sleep(0.02)  # Poll matching the state stream rate (~50 Hz)
-
-        return True  # Indicate that the waypoint was successfully reached
 
     def update_map_from_camera(self):
         if not self.camera_info:
@@ -236,7 +238,7 @@ class Controller:
 
     def execute_recovery(self):
         """Rotate in place to clear the bumper sensor."""
-        wheel_radius = self.robot_info["radius"]
+        wheel_radius = self.robot_info["wheel_radius"]
         wheel_base = self.robot_info["wheel_base"]
         
         target_reverse_distance = 0.17 + 0.10

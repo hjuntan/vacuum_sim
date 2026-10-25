@@ -63,13 +63,12 @@ def main():
     scene, _ = client.call("load_scene", id=selected_scene_id, seed=selected_seed)
     print(f"Start Pose: {scene['start']}")
 
-    # start_pose = scene["start"]
-    # print(f"Start Pose: {start_pose}")
-
     # Get map, robot and camera data
     map_info, (png,) = client.call("get_map")
     robot_info, _ = client.call("get_robot_info")
     camera_info, _ = client.call("get_camera_info")
+
+    print(f"Map loaded: {map_info['width']}x{map_info['height']} at resolution {map_info['resolution']}m/pixel")
 
     # Initialize the controller and planner
     planner = Planner(map_info, png)
@@ -85,23 +84,9 @@ def main():
         print("Error: No goals found in scene.")
         exit(1)
 
-    target_goal = goals[2]
-    goal_pose = target_goal["pose"]
-    print(f"Testing path to Goal '{target_goal['name']}' at pose: {goal_pose}")
+    formatted_goals = [(idx, target["name"], target["pose"]) for idx, target in enumerate(goals)]
 
-    # Get map and initialize planner
-    map_info, (png,) = client.call("get_map")
-    print(f"Map loaded: {map_info['width']}x{map_info['height']} at resolution {map_info['resolution']}m/pixel")
-
-    for idx, target in enumerate(goals):
-        # Format: [x, y] or [x, y, yaw]
-        goal_name = target["name"]
-        goal_pose = target["pose"]
-
-        robot_state = client.latest_state()
-        current_pose = robot_state["pose"]
-        
-        controller.execute_goal_mission(idx, goal_name, goal_pose, current_pose=current_pose)
+    controller.run_nearest_neighbor_missions(formatted_goals)
 
     print("\n####################")
     print("All goals processed!")

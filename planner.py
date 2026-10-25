@@ -9,7 +9,7 @@ from PIL import Image
 from scipy.ndimage import binary_dilation
 
 class Planner:
-    def __init__(self, map_info, png, robot_diameter=0.34, leeway=0.075):
+    def __init__(self, map_info, png, robot_diameter=0.34, leeway=0.025):
         self.resolution = map_info["resolution"]
 
         # Row 0 is the top of the image (largest y); rows grow towards −y, columns towards +x.
@@ -116,6 +116,58 @@ class Planner:
                 return False
         return True
 
+    def mark_obstacle_from_camera(self, depth, camera_info, robot_pose):
+        """Reset dynamic map to base and project close-range camera obstacles (0.35m to 1.2m)."""
+        self.grid = self.base_grid.copy()
+
+        h, w = depth.shape
+        x, y = robot_pose["x"], robot_pose["y"]
+        fx, fy, cx, cy = camera_info["fx"], camera_info["fy"], camera_info["cx"], camera_info["cy"]
+        T_base_camera = np.array(camera_info["T_base_camera"])
+
+        yaw = robot_pose["yaw"]
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+
+        v_min, v_max = int(h * 0.2), int(h * 0.5)
+        u_min, u_max = int(w * 0.3), int(w * 0.7)
+
+        valid_world_points = []
+        for v in range(v_min, v_max, 2):
+            for u in range(u_min, u_max, 2):
+                z = depth[v, u]
+                if z == 0 or z < 0.35 or z > 1.2:
+                    continue
+
+                x_camera = (u - cx) * z / fx
+                y_camera = (v - cy) * z / fy
+
+                p_camera = np.array([x_camera, y_camera, z, 1.0])
+                p_robot = T_base_camera @ p_camera
+
+                height_z = p_robot[2]
+                if height_z < 0.05 or height_z > 0.8:
+                    continue
+
+                x_world = x + cos_yaw * p_robot[0] - sin_yaw * p_robot[1]
+                y_world = y + sin_yaw * p_robot[0] + cos_yaw * p_robot[1]
+                valid_world_points.append((x_world, y_world))
+
+        map_points = [self.world_to_map(xw, yw) for xw, yw in valid_world_points]
+
+        cell_counts = {}
+        for r, c in map_points:
+            if 0 <= r < self.height and 0 <= c < self.width:
+                cell_counts[(r, c)] = cell_counts.get((r, c), 0) + 1
+
+        for (r, c), count in cell_counts.items():
+            if count >= 3:
+                for dr in range(-self.radius_px, self.radius_px + 1):
+                    for dc in range(-self.radius_px, self.radius_px + 1):
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < self.height and 0 <= nc < self.width:
+                            if math.hypot(dr * self.resolution, dc * self.resolution) <= self.radius:
+                                self.grid[nr, nc] = 255
+
     def mark_obstacle_from_bumper(self, robot_pose):
         """Precisely mark an obstacle at the robot's perimeter when a bumper collision occurs."""
         x, y, yaw = robot_pose["x"], robot_pose["y"], robot_pose["yaw"]
@@ -152,8 +204,7 @@ class Planner:
         return row, col
 
     def optimize_path(self, start_pose, path, spacing=0.5):
-        """Prune redundant waypoints using line-of-sight for sharp turns, 
-        then resample straight segments so waypoints are spaced by `spacing` (e.g., 50cm)."""
+        """Prune redundant waypoints using greedy line-of-sight string-pulling (minimal waypoints, sharp turns)."""
         if not path:
             return []
 
@@ -171,33 +222,7 @@ class Planner:
             optimized.append(full_path[furthest_safe])
             i = furthest_safe
 
-        # Step 2: Resample the corner-to-corner path at fixed 50cm intervals
-        resampled = []
-        if len(optimized) > 0:
-            resampled.append(optimized[0])
-
-        for k in range(len(optimized) - 1):
-            p1 = optimized[k]
-            p2 = optimized[k + 1]
-
-            dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-            if dist == 0:
-                continue
-
-            # Calculate how many 50cm steps fit into this segment
-            num_steps = max(1, math.ceil(dist / spacing))
-
-            for step in range(1, num_steps + 1):
-                t = step / num_steps
-                x = p1[0] + t * (p2[0] - p1[0])
-                y = p1[1] + t * (p2[1] - p1[1])
-                
-                # Avoid duplicate points near the end of segments
-                if not resampled or math.hypot(x - resampled[-1][0], y - resampled[-1][1]) > 0.05:
-                    resampled.append((x, y))
-
-        # Return resampled path excluding the starting position
-        return resampled[1:] if resampled else []
+        return optimized[1:]
 
     def is_line_safe_points(self, p1, p2, step_size=0.05):
         """Helper to check if a straight line between two world coordinates is obstacle-free."""
