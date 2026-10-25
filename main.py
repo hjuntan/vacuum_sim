@@ -71,33 +71,78 @@ def main():
 
     print(f"Map loaded: {map_info['width']}x{map_info['height']} at resolution {map_info['resolution']}m/pixel")
 
-    # Initialize the controller and planner
-    planner = Planner(map_info, png)
-    controller = Controller(client, planner, robot_info, camera_info)
-
-    # Initialize and start camera recorder (Task 2)
-    recorder = Recorder(client)
-    recorder.start()
-
     # Get available goals
     goals = scene["goals"]
     if not goals:
         goals, _ = client.call("get_goals")
     print("Goals:", [g["name"] for g in goals])
 
+    # Initialize the controller and planner
+    planner = Planner(map_info, png)
+    controller = Controller(client, planner, robot_info, camera_info)
+
+    # Initialize and start camera recorder (Task 2)
+    recorder = Recorder(client)
+    recording_started = False
+
     if not goals:
         print("Error: No goals found in scene.")
-        exit(1)
+        recorder.stop()
+        return
 
-    formatted_goals = [(idx, target["name"], target["pose"]) for idx, target in enumerate(goals)]
+    # 🌟 Continuous goal selection loop by name
+    try:
+        while True:
+            print("\n" + "="*30)
+            print("--- Available Goals ---")
+            for g in goals:
+                print(f" - {g['name']}")
+            print(" 'q' | Quit / Exit     ")
+            print("="*30)
 
-    controller.run_nearest_neighbor_missions(formatted_goals)
+            goal_name_input = input(f"\nEnter the goal name (or 'q' to exit): ").strip()
+            
+            if goal_name_input.lower() == 'q':
+                print("🛑 Exiting goal selection loop...")
+                break
 
-    recorder.stop()
+            # Find matching goal by name (case-insensitive)
+            matched_goal = None
+            matched_idx = -1
+            for idx, g in enumerate(goals):
+                if g['name'].lower() == goal_name_input.lower():
+                    matched_goal = g
+                    matched_idx = idx
+                    break
 
-    print("\n####################")
-    print("All goals processed!")
-    print("####################")
+            if not matched_goal:
+                print(f"⚠️ Goal '{goal_name_input}' not found. Please type an exact name from the list above.")
+                continue
+
+            if not recording_started:
+                recorder.start()
+                recording_started = True
+
+            goal_name = matched_goal["name"]
+            goal_pose = matched_goal["pose"]
+
+            print(f"\n🎯 Selected goal: '{goal_name}' at coordinates {goal_pose}")
+
+            # Get current robot pose and execute the mission to the chosen goal
+            robot_state = client.latest_state()
+            current_pose = robot_state["pose"]
+
+            controller.execute_goal_mission(matched_idx, goal_name, goal_pose, current_pose)
+
+    except Exception as e:
+        print(f"⚠️: {e}")
+
+    finally:
+        if recording_started:
+            recorder.stop()
+        print("\n####################")
+        print("Session ended cleanly!")
+        print("####################")
 
 if __name__ == "__main__":
     main()
