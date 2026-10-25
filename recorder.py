@@ -17,12 +17,7 @@ class Recorder:
         self.frame_count = 0
         self.session_dir = None
 
-        # 🛡️ Create an independent, dedicated ZMQ SUB socket for the recorder thread
-        # This prevents the recorder and controller from competing for messages on client.camera
-        self.camera_sub = client.ctx.socket(zmq.SUB)
-        self.camera_sub.setsockopt(zmq.RCVHWM, 2)
-        self.camera_sub.connect(f"tcp://{client.host}:{client.port_base + 3}")
-        self.camera_sub.setsockopt(zmq.SUBSCRIBE, b"")
+        client.create_recorder_camera_socket()
 
     def start(self):
         """Start recording the camera stream"""
@@ -57,16 +52,9 @@ class Recorder:
             while self.is_recording:
                 try:
                     # Fetch latest camera multipart message from dedicated recorder socket ("latest wins")
-                    msg = self.camera_sub.recv_multipart()
-                    while self.camera_sub.poll(0):
-                        msg = self.camera_sub.recv_multipart()
-                    
-                    if not msg or len(msg) < 3:
-                        time.sleep(0.01)
-                        continue
+                    header, jpg, raw = self.client.latest_recording()
 
-                    header_bytes, jpg_bytes, raw_bytes = msg[0], msg[1], msg[2]
-                    header = json.loads(header_bytes.decode("utf-8") if isinstance(header_bytes, bytes) else header_bytes)
+                    header = json.loads(header)
                     
                     seq = header["seq"]
                     t = header["t"]
@@ -75,11 +63,11 @@ class Recorder:
                     height = header["height"]
                     
                     # Process and write RGB frame to MP4 video
-                    img_rgb = np.array(Image.open(io.BytesIO(jpg_bytes)))
+                    img_rgb = np.array(Image.open(io.BytesIO(jpg)))
                     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                     
                     # Process Depth frame into Depth Video
-                    depth = np.frombuffer(raw_bytes, dtype="<u2").reshape(height, width)
+                    depth = np.frombuffer(raw, dtype="<u2").reshape(height, width)
 
                     # Normalize depth (0 to 6000 mm) to 0-255 range for 8-bit video visualization
                     depth_norm = np.clip(depth / 6000.0 * 255.0, 0, 255).astype(np.uint8)

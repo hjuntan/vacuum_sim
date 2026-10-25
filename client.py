@@ -8,16 +8,20 @@ class Client:
 
         self.ctx = zmq.Context()
 
+        # RPC synchronous request socket
         self.rpc = self.ctx.socket(zmq.REQ)
         self.rpc.connect(self.url(0))
 
+        # Command push socket
         self.cmd = self.ctx.socket(zmq.PUSH)
         self.cmd.connect(self.url(1))
-        
+
+        # Robot state subscriber socket
         self.state = self.ctx.socket(zmq.SUB)
         self.state.connect(self.url(2))
         self.state.setsockopt(zmq.SUBSCRIBE, b"")
 
+        # Main camera subscriber socket
         self.camera = self.ctx.socket(zmq.SUB)
         self.camera.setsockopt(zmq.RCVHWM, 2)
         self.camera.connect(self.url(3))
@@ -59,3 +63,15 @@ class Client:
         """Send wheels command."""
         payload = {"type": "wheels", "left": left, "right": right}
         self.cmd.send_json(payload)
+
+    def create_recorder_camera_socket(self):
+        self.camera_recorder = self.ctx.socket(zmq.SUB)
+        self.camera_recorder.setsockopt(zmq.RCVHWM, 2)
+        self.camera_recorder.connect(self.url(3))
+        self.camera_recorder.setsockopt(zmq.SUBSCRIBE, b"")
+
+    def latest_recording(self):
+        msg = self.camera_recorder.recv_multipart()
+        while self.camera_recorder.poll(0):
+            msg = self.camera_recorder.recv_multipart()
+        return msg
