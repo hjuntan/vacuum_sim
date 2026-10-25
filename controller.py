@@ -107,8 +107,9 @@ class Controller:
                 elif status == "bumped":
                     print(f"\n💥 Robot bumped an obstacle! Marking and recovering...")
                     # Precisely mark the obstacle using the robot pose at the moment of impact
-                    self.update_map_from_camera()
+                    self.planner.mark_obstacle_from_bumper(pose)
                     self.execute_recovery(goal_pose)
+                    self.update_map_from_camera()
                     print("Recovery rotation complete. Switching to A* planner...")
                     break
             time.sleep(0.02)
@@ -122,7 +123,6 @@ class Controller:
     def navigate_A_star_path(self, current_pose, goal_idx, goal_name, goal_pose):
         max_attempts = 20
         for attempt in range(max_attempts):
-            self.update_map_from_camera()
 
             robot_state = self.client.latest_state()
             current_pose = robot_state["pose"]
@@ -175,7 +175,8 @@ class Controller:
             if robot_state.get("bumper", False):
                 print("💥 Bumper collision detected during smooth wheel navigation!")
                 self.planner.mark_obstacle_from_bumper(pose)
-                self.execute_recovery()
+                self.execute_recovery(goal_pose)
+                self.update_map_from_camera()
                 return False
 
             # Find the furthest waypoint within lookahead distance for smooth path tracking
