@@ -56,6 +56,7 @@ def main():
 
     print(f"\nLoading scene '{selected_scene_id}' with seed {selected_seed}...")
     scene, _ = client.call("load_scene", id=selected_scene_id, seed=selected_seed)
+    start_pose = scene['start']
     print(f"Start Pose: {scene['start']}")
 
     # Get map, robot and camera data
@@ -95,7 +96,7 @@ def main():
             print("="*30)
 
             # Show all available goals visually
-            planner.visualize(all_goals=goals)
+            planner.visualize(robot_pose=start_pose, all_goals=goals)
 
             goal_name_input = input(f"\nEnter the goal name (or 'q' to exit): ").strip()
             
@@ -130,6 +131,8 @@ def main():
             current_pose = robot_state["pose"]
 
             controller.execute_goal_mission(matched_idx, goal_name, goal_pose, current_pose)
+
+            start_pose = client.latest_state()["pose"]
 
     except Exception as e:
         print(f"⚠️: {e}")
