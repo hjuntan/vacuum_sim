@@ -29,7 +29,7 @@ class Controller:
         
         # A* fallback if direct navigation fails or is not clear
         print(f"Using A* waypoints...")
-        return self.navigate_A_star_path(current_pose, goal_idx, goal_name, goal_pose)
+        return self.navigate_A_star_path(current_pose, goal_name, goal_pose)
 
 
     def navigate_direct_path(self, current_pose, goal_idx, goal_name, goal_pose):
@@ -83,16 +83,25 @@ class Controller:
         
         return direct_success
 
-    def navigate_A_star_path(self, current_pose, goal_idx, goal_name, goal_pose):
+    def navigate_A_star_path(self, current_pose, goal_name, goal_pose):
         max_attempts = 20
-        for attempt in range(max_attempts):
+        num_of_attempts = 0
+        while num_of_attempts < max_attempts:
 
             robot_state = self.client.latest_state()
             current_pose = robot_state["pose"]
             path = self.planner.plan(current_pose, goal_pose)
 
             if not path:
-                print(f"❌ A* failed to find a path to '{goal_name}'. Waiting and retrying...")
+                # If this happens, the robot might:
+                # a) mark obstacles that are not present anywhere and block the map
+                # b) trapped inside an obstacle it marked
+                # c) mark an obstacle at the end goal
+                print(f"❌ A* failed to find a path to '{goal_name}'. Recompute map...")
+
+                # Reset the map and the amount of attempts
+                self.planner.compute_grid()
+                num_of_attempts = 0
                 time.sleep(0.5)
                 continue
 
@@ -101,21 +110,20 @@ class Controller:
             if path[-1] not in waypoints:
                 waypoints.append(path[-1])
 
-            # waypoints = path[::5]
-
-            navigation_success = self.navigate_waypoints(current_pose, goal_idx, goal_name, waypoints, goal_pose)
+            navigation_success = self.navigate_waypoints(current_pose, goal_name, waypoints, goal_pose)
             
             if navigation_success:
                 self.mark_goal(goal_name)
                 return True
             else:
                 print("🔄 Bump detected during navigation. Re-running A* search with updated map...")
+                num_of_attempts += 1
                 time.sleep(0.2)
 
         print(f"❌ Failed to reach goal '{goal_name}' after {max_attempts} attempts.")
         return False
 
-    def navigate_waypoints(self, current_pose, goal_idx, goal_name, waypoints, goal_pose):
+    def navigate_waypoints(self, current_pose, goal_name, waypoints, goal_pose):
         """Navigation and monitoring methods for waypoints and recovery rotation are defined below."""
 
         # Parameters for smooth driving
@@ -192,6 +200,7 @@ class Controller:
 
             time.sleep(0.02)
 
+        # This line shouldn't reach as it reaches the goal
         self.client.send_wheels(0.0, 0.0)
         return True
 
@@ -211,7 +220,6 @@ class Controller:
     def execute_recovery(self, goal_pose=None):
         """Rotate in place to clear the bumper sensor."""
         wheel_radius = self.robot_info["wheel_radius"]
-        wheel_base = self.robot_info["wheel_base"]
         
         target_reverse_distance = 0.17 + 0.10
         linear_speed = 0.25 # m/s 
